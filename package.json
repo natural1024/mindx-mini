@@ -1,0 +1,64 @@
+{
+  "name": "mindx-mini",
+  "private": true,
+  "packageManager": "pnpm@9.7.1+sha512.faf344af2d6ca65c4c5c8c2224ea77a81a5e8859cbc4e06b1511ddce2f0151512431dd19e6aff31f2c6a8f5f2aced9bd2273e1fed7dd4de1868984059d2c4247",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "browserslist": [
+    "iOS >= 13",
+    "Safari >= 13",
+    "Chrome >= 55"
+  ],
+  "scripts": {
+    "dev": "pnpm exec nx dev @mindx/app-hello",
+    "build": "pnpm exec nx run-many -t build",
+    "dist": "pnpm exec nx dist @mindx/app-hello",
+    "typecheck": "pnpm exec nx run-many -t typecheck",
+    "lint": "pnpm --filter './**' lint",
+    "lint:styles": "stylelint '**/*.less' --ignore-path .gitignore",
+    "test": "pnpm --filter './**' test",
+    "test:workflow": "node --test scripts/workflow/tests/*.test.mjs",
+    "clean": "pnpm --filter './**' clean && rm -rf dist && rm -rf public && rm -rf .nx",
+    "prepare": "husky",
+    "postinstall": "mindx-engineering-skills sync"
+  },
+  "dependencies": {
+    "core-js": "3.39.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.5.0",
+    "@commitlint/config-conventional": "^19.5.0",
+    "@mindx/build-config": "workspace:*",
+    "@mindx/eslint-config": "workspace:*",
+    "@rspack/cli": "^1.0.0",
+    "@rspack/core": "^1.0.0",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@tencent/mindx-engineering-skills": "catalog:",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "autoprefixer": "^10.5.4",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^9.0.0",
+    "husky": "^9.1.6",
+    "less": "^4.2.0",
+    "less-loader": "^12.2.0",
+    "lint-staged": "^15.2.10",
+    "node-polyfill-webpack-plugin": "^4.1.0",
+    "nx": "22.6.5",
+    "postcss-less": "^6.0.0",
+    "postcss-loader": "8.2.1",
+    "prettier": "^3.0.0",
+    "stylelint": "^17.9.0",
+    "stylelint-config-standard": "^40.0.0",
+    "tailwindcss": "^4.2.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0",
+    "zx": "^8.5.3"
+  }
+}

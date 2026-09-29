@@ -1,0 +1,299 @@
+.mindx-release-pr: &mindx-release-pr
+  name: MindX release build and runtime smoke
+  runner:
+    tags: cnb:arch:amd64
+    cpus: 16
+  git:
+    enable: true
+  docker:
+    build:
+      dockerfile: .ci/mindx-release.dockerfile
+      versionBy:
+        - .ci/mindx-release.dockerfile
+    volumes:
+      - ./.pnpm-store
+  services:
+    - docker
+  env: &mindx-release-env
+    TZ: Asia/Shanghai
+    NX_SKIP_NX_CACHE: "1"
+    MINDX_RELEASE_REGION: cn
+  ifModify:
+    - apps/mindx/**
+    - apps/mindx-webserver/**
+    - packages/**
+    - tools/build-config/**
+    - pnpm-lock.yaml
+    - pnpm-workspace.yaml
+    - package.json
+    - .cnb.yml
+    - .ci/mindx-release.yml
+    - .ci/mindx-release.dockerfile
+    - scripts/deploy/**
+  stages:
+    - name: Generate PR release variables
+      script: node scripts/deploy/release-vars.mjs --pr --sha "$CNB_PULL_REQUEST_SHA" --region "$MINDX_RELEASE_REGION"
+      exports:
+        ASSET_RELEASE_ID: ASSET_RELEASE_ID
+        CDN_RELEASE_URL: CDN_RELEASE_URL
+        IMAGE_REPOSITORY: IMAGE_REPOSITORY
+        IMAGE_TAG: IMAGE_TAG
+        IMAGE_VERSION_DATE: IMAGE_VERSION_DATE
+        MINDX_FEDERATION_CDN_BASE_URL: MINDX_FEDERATION_CDN_BASE_URL
+        MINDX_PUBLIC_ASSET_BASE_URL: MINDX_PUBLIC_ASSET_BASE_URL
+
+    - name: Install, test release tooling, and build once
+      script: |
+        set -eu
+        test "$NX_SKIP_NX_CACHE" = "1"
+        export PNPM_STORE_PATH="${PNPM_STORE_PATH:-$PWD/.pnpm-store}"
+        mkdir -p "$PNPM_STORE_PATH"
+        pnpm config set store-dir "$PNPM_STORE_PATH"
+        pnpm install --frozen-lockfile --prefer-offline
+        node --test scripts/deploy/*.test.mjs
+        pnpm run clean
+        NX_SKIP_NX_CACHE=1 pnpm run build
+        NX_SKIP_NX_CACHE=1 pnpm run dist
+        NX_SKIP_NX_CACHE=1 pnpm --filter @mindx/app-mindx dist:federation:checked
+        NX_SKIP_NX_CACHE=1 pnpm --filter @mindx/app-mindx-webserver build
+
+    - name: Verify local release artifacts
+      script: |
+        set -eu
+        node scripts/deploy/verify-mindx-release.mjs local \
+          --asset-base-url "$MINDX_PUBLIC_ASSET_BASE_URL" \
+          --federation-base-url "$MINDX_FEDERATION_CDN_BASE_URL" \
+          --output .release/mindx-release.json
+
+    - name: Build and smoke-test local runtime image
+      script: |
+        set -eu
+        node scripts/deploy/prepare-mindx-runtime-context.mjs
+        node scripts/deploy/smoke-mindx-runtime.mjs \
+          --image "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+          --asset-base-url "$MINDX_PUBLIC_ASSET_BASE_URL" \
+          --federation-base-url "$MINDX_FEDERATION_CDN_BASE_URL"
+
+    - name: Check stable OGP resources without blocking
+      script: node scripts/deploy/verify-mindx-release.mjs ogp
+
+.mindx-release-publish: &mindx-release-publish
+  name: MindX release
+  runner:
+    tags: cnb:arch:amd64
+    cpus: 16
+  git:
+    enable: true
+  docker:
+    build:
+      dockerfile: .ci/mindx-release.dockerfile
+      versionBy:
+        - .ci/mindx-release.dockerfile
+    volumes:
+      - ./.pnpm-store
+  services:
+    - docker
+  env: *mindx-release-env
+  lock:
+    key: mindx-release-$CNB_BRANCH-$MINDX_RELEASE_REGION
+    expires: 10800
+    timeout: 10800
+    wait: true
+    cancel-in-wait: true
+  stages:
+    - &mindx-release-variables
+      name: Generate immutable release variables
+      script: |
+        set -eu
+        git cat-file -e "$CNB_COMMIT^{commit}"
+        node scripts/deploy/release-vars.mjs --release --sha "$CNB_COMMIT" --region "$MINDX_RELEASE_REGION"
+      exports:
+        ASSET_RELEASE_ID: ASSET_RELEASE_ID
+        CDN_RELEASE_URL: CDN_RELEASE_URL
+        IMAGE_REPOSITORY: IMAGE_REPOSITORY
+        IMAGE_TAG: IMAGE_TAG
+        IMAGE_VERSION_DATE: IMAGE_VERSION_DATE
+        MINDX_FEDERATION_CDN_BASE_URL: MINDX_FEDERATION_CDN_BASE_URL
+        MINDX_PUBLIC_ASSET_BASE_URL: MINDX_PUBLIC_ASSET_BASE_URL
+
+    - &mindx-release-build
+      name: Install, typecheck, test, and build once
+      script: |
+        set -eu
+        test "$NX_SKIP_NX_CACHE" = "1"
+        export PNPM_STORE_PATH="${PNPM_STORE_PATH:-$PWD/.pnpm-store}"
+        mkdir -p "$PNPM_STORE_PATH"
+        pnpm config set store-dir "$PNPM_STORE_PATH"
+        pnpm install --frozen-lockfile --prefer-offline
+        pnpm typecheck
+        pnpm test
+        node --test scripts/deploy/*.test.mjs
+        pnpm run clean
+        NX_SKIP_NX_CACHE=1 pnpm run build
+        NX_SKIP_NX_CACHE=1 pnpm run dist
+        NX_SKIP_NX_CACHE=1 pnpm --filter @mindx/app-mindx dist:federation:checked
+        NX_SKIP_NX_CACHE=1 pnpm --filter @mindx/app-mindx-webserver build
+
+    - &mindx-release-verify-local
+      name: Verify local release artifacts and write upload manifest
+      script: |
+        set -eu
+        node scripts/deploy/verify-mindx-release.mjs local \
+          --asset-base-url "$MINDX_PUBLIC_ASSET_BASE_URL" \
+          --federation-base-url "$MINDX_FEDERATION_CDN_BASE_URL" \
+          --output .release/mindx-release.json
+
+    - name: Upload immutable static assets to both COS buckets
+      imports:
+        - https://cnb.woa.com/genie/secret/-/blob/main/mindx-release-cos.yaml
+      script: |
+        set -eu
+        : "${COS_SECRET_ID:?missing COS_SECRET_ID}"
+        : "${COS_SECRET_KEY:?missing COS_SECRET_KEY}"
+        : "${COS_ENDPOINT:?missing COS_ENDPOINT}"
+        test "$COS_BUCKET" = "acc-1258344699"
+        test "$NEW_COS_BUCKET" = "client-pkg-1258344699"
+        test "$CNB_COMMIT" = "$ASSET_RELEASE_ID"
+
+        coscmd config \
+          -a "$COS_SECRET_ID" \
+          -s "$COS_SECRET_KEY" \
+          -b "$COS_BUCKET" \
+          -e "$COS_ENDPOINT" \
+          --do-not-use-ssl
+        coscmd -b acc-1258344699 upload -r \
+          apps/mindx/public/cdn/ \
+          "/web/library/$CNB_COMMIT/"
+        coscmd -b client-pkg-1258344699 upload -r \
+          apps/mindx/public/cdn/ \
+          "/web/library/$CNB_COMMIT/"
+        coscmd -b acc-1258344699 list -r -a \
+          "/web/library/$CNB_COMMIT/" > .release/cos-acc.list
+        coscmd -b client-pkg-1258344699 list -r -a \
+          "/web/library/$CNB_COMMIT/" > .release/cos-client-pkg.list
+
+    - name: Verify both COS listings and public CDN
+      script: |
+        set -eu
+        node scripts/deploy/verify-mindx-release.mjs remote \
+          --metadata .release/mindx-release.json \
+          --remote-prefix "/web/library/$CNB_COMMIT/" \
+          --remote-list .release/cos-acc.list \
+          --remote-list .release/cos-client-pkg.list
+
+    - &mindx-release-smoke
+      name: Build and smoke-test the verified runtime image
+      script: |
+        set -eu
+        node scripts/deploy/prepare-mindx-runtime-context.mjs
+        node scripts/deploy/smoke-mindx-runtime.mjs \
+          --image "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+          --asset-base-url "$MINDX_PUBLIC_ASSET_BASE_URL" \
+          --federation-base-url "$MINDX_FEDERATION_CDN_BASE_URL"
+
+    - &mindx-release-push-image
+      name: Log in and push the immutable runtime image
+      imports:
+        - https://cnb.woa.com/genie/secret/-/blob/main/mindx-release-tcr.yaml
+      script: |
+        set -eu
+        registry_host="${DOCKER_REGISTRY#https://}"
+        registry_host="${registry_host%/}"
+        test "$registry_host" = "${IMAGE_REPOSITORY%%/*}"
+        : "${DOCKER_USER:?missing DOCKER_USER}"
+        : "${DOCKER_PASS:?missing DOCKER_PASS}"
+
+        printf '%s' "$DOCKER_PASS" | docker login \
+          --username "$DOCKER_USER" \
+          --password-stdin \
+          "$registry_host"
+        image_ref="$IMAGE_REPOSITORY:$IMAGE_TAG"
+        docker push "$image_ref"
+        IMAGE_DIGEST="$(docker inspect \
+          --format='{{range .RepoDigests}}{{println .}}{{end}}' \
+          "$image_ref" | awk -F@ 'NF == 2 { print $2; exit }')"
+        if ! printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+          IMAGE_DIGEST="$(docker buildx imagetools inspect "$image_ref" \
+            --format '{{json .Manifest}}' \
+            | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).digest||""))')"
+        fi
+        printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+        echo "IMAGE_DIGEST=$IMAGE_DIGEST"
+        echo "##[set-output IMAGE_DIGEST=$IMAGE_DIGEST]"
+      exports:
+        IMAGE_DIGEST: IMAGE_DIGEST
+
+    - &mindx-release-delivery
+      name: Output delivery contract
+      script: |
+        set -eu
+        cat <<EOF
+        MINDX_RELEASE_REGION=$MINDX_RELEASE_REGION
+        IMAGE_REPOSITORY=$IMAGE_REPOSITORY
+        IMAGE_VERSION_DATE=$IMAGE_VERSION_DATE
+        IMAGE_TAG=$IMAGE_TAG
+        IMAGE_DIGEST=$IMAGE_DIGEST
+        CDN_RELEASE_URL=$CDN_RELEASE_URL
+        EOF
+
+.mindx-release-publish-international: &mindx-release-publish-international
+  <<: *mindx-release-publish
+  name: MindX international release
+  env:
+    <<: *mindx-release-env
+    MINDX_RELEASE_REGION: international
+  stages:
+    - *mindx-release-variables
+    - *mindx-release-build
+    - *mindx-release-verify-local
+
+    - name: Upload immutable static assets to Singapore COS
+      imports:
+        - https://cnb.woa.com/genie/secret/-/blob/main/mindx-release-cos-sg.yaml
+      script: |
+        set -eu
+        : "${COS_SECRET_ID:?missing COS_SECRET_ID}"
+        : "${COS_SECRET_KEY:?missing COS_SECRET_KEY}"
+        test "$COS_BUCKET" = "codebuddy-1328495429"
+        test "$COS_ENDPOINT" = "cos.ap-singapore.myqcloud.com"
+        test "$CNB_COMMIT" = "$ASSET_RELEASE_ID"
+
+        coscmd config \
+          -a "$COS_SECRET_ID" \
+          -s "$COS_SECRET_KEY" \
+          -b "$COS_BUCKET" \
+          -e "$COS_ENDPOINT"
+        coscmd -b "$COS_BUCKET" upload -r \
+          apps/mindx/public/cdn/ \
+          "/web/library/$CNB_COMMIT/"
+        coscmd -b "$COS_BUCKET" list -r -a \
+          "/web/library/$CNB_COMMIT/" > .release/cos-singapore.list
+
+    - name: Verify Singapore COS listing and public CDN
+      script: |
+        set -eu
+        node scripts/deploy/verify-mindx-release.mjs remote \
+          --metadata .release/mindx-release.json \
+          --remote-prefix "/web/library/$CNB_COMMIT/" \
+          --remote-list .release/cos-singapore.list
+
+    - *mindx-release-smoke
+    - <<: *mindx-release-push-image
+      imports:
+        - https://cnb.woa.com/genie/secret/-/blob/main/mindx-release-tcr-sg.yaml
+    - *mindx-release-delivery
+
+main:
+  pull_request:
+    - *mindx-release-pr
+    - <<: *mindx-release-pr
+      name: MindX international release build and runtime smoke
+      env:
+        <<: *mindx-release-env
+        MINDX_RELEASE_REGION: international
+
+# staging 用于合入 main 前的预发验证；release/* 保留正式发布入口。
+"(staging|release/*)":
+  push:
+    - *mindx-release-publish
+    - *mindx-release-publish-international

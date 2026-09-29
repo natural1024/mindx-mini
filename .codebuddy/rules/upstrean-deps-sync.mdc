@@ -1,0 +1,43 @@
+---
+description: 任何代码的改动（运行 git status 检测到 unstaged changes）时，触发该规则，进行影响面分析，并触发相应的上游依赖同步修正流程
+alwaysApply: false
+enabled: true
+updatedAt: 2026-04-20T12:09:03.014Z
+provider:
+---
+
+# 上游依赖同步流程
+
+当改动了下游的基础库时，必须同步检查和修改上游的依赖。
+
+## UI Components 改动评估与修复
+
+- 改动目录: packages/ui-components
+- 改动文件类型： ts(x) 存量文件改动（不含新增的代码文件）
+- 上游依赖：`apps/mindx` 下的 pages、components、hooks、parsers 等实际调用方
+
+### 改动类型一: 组件名变更
+
+检查组件名是否变更，如果变更，则需要同步修改上游依赖中的组件名。
+
+### 改动类型二: 组件的 Props 变更
+
+检查组件的 Props 是否变更，如果变更，则需要同步修改上游依赖中的 Props。
+
+## Core Data 改动评估与修复
+
+- 改动目录: packages/core-data
+- 改动文件类型： ts(x) 存量文件改动（不含新增的代码文件）,如 service, model 等
+- 上游依赖： apps/mindx 下的 pages, data, hooks 等
+
+mindx 依赖 Core Data 来获取业务数据，如果 Core Data 的接口变更，需要检查并修改上游依赖中的接口与字段取值等
+
+### 改动类型一: models 字段变更
+
+当 models 的字段取值或字段数据类型发生变更时，需要同步检查 mindx 下的 data, pages, hooks 等中是否引用了该字段，
+检查改动是否影响已有的代码逻辑，如有必要，需要按新的字段名/类型，修改代码并进行 Lint 检查
+
+### 改动类型二: service 接口变更
+
+当 service 的接口变更时，需要同步检查 mindx 下的 pages, hooks 等中是否引用了该接口，
+检查改动是否影响已有的代码逻辑，如有必要，需要按新的接口名/参数，修改代码并进行 Lint 检查

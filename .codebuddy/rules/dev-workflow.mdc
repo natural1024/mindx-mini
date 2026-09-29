@@ -1,0 +1,62 @@
+---
+description: 任何代码修改在落笔前先选择 workflow mode 与 L1/L2/L3，并按稳定 prompt/result contract 编排 Plan/Code/Review/Test。
+alwaysApply: true
+enabled: true
+updatedAt: 2026-08-01T00:00:00.000Z
+provider:
+---
+
+# Dev Workflow 强制路由
+
+本规则只负责分档与 Agent Team 编排。Issue、分支和发布由对应上游/出口 skill 负责。
+
+## 写入前声明
+
+同一任务在第一次写入前输出一次：
+
+```text
+[DevWorkflow] 模式=<prototype|implementation|infrastructure>，分档=L<1|2|3>，理由=<一句话>
+```
+
+任务边界、模式或档位变化时重新声明；同一任务的连续 diff 不重复声明。
+
+| 档位 | 条件                                             | 流程                                                     |
+| :--- | :----------------------------------------------- | :------------------------------------------------------- |
+| L1   | 不超过 20 行、单文件、非 core-data、且不新建文件 | 主会话直改并跑相关静态检查                               |
+| L2   | 1–3 个组件/Hook、小特性或 bug 修复               | Code → Review → Test                                     |
+| L3   | 新页面、跨层、正式业务模型或至少 4 文件重构      | tracked plan 获用户批准后，分段 Code → Review，最终 Test |
+
+判不准时向上升档。`prototype`、`implementation`、`infrastructure` 的契约和边界以 `.codebuddy/skills/dev-workflow/SKILL.md` 为准。
+
+## 稳定协作契约
+
+Plan、Code、Review、Test 的 prompt 顶层统一为：
+
+```yaml
+workflow_mode: ...
+tier: ...
+task: ...
+contract: ...
+scope: ...
+evidence: ...
+```
+
+不得再创建同义顶层字段。工作流只检查输入字段、结果状态和逐 AC/ENG 证据。
+
+L3 plan 的读写按以下 heading 名定位：
+
+路径使用 `.vibe/plans/plan-<plan_key>.md`：Issue key 沿用 IID，draft key 为 `draft-<draftId>`，infrastructure key 为 `infra-<stable-task-id-or-slug>`。`plan_key` 放在通用 envelope 的 `task` 内；不得新增顶层字段，也不得以 `NO-ISSUE` 作为文件名。
+
+- `## Contract`
+- `## Design`
+- `## Tasks`
+- `## Verification`
+- `## Execution log`
+
+`## Tasks` 是 todo 权威源，IDE todo 只是投影；`## Execution log` 只追加。Plan 成功输出 `✓ plan 已生成 → <path>`。Review 返回 `result: PASS|NOT_PASS`，Test 返回 `result: PASS|FAIL`，Code 也返回 `result`；三者都必须带逐 AC/ENG 的 `ac_evidence`。
+
+## 回推与收尾
+
+Review/Test 最多各回推 Code 两轮，仍不通过就熔断并交还用户。L2/L3 通过后可以进入 Polish 窗口；新文件、新需求、跨层改动或超出 L1 阈值时重新分档。
+
+dev-workflow 不自动提交、push、创建 PR 或发布。详细编排见 `.codebuddy/skills/dev-workflow/SKILL.md`。

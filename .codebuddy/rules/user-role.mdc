@@ -1,0 +1,94 @@
+---
+description: 执行任何操作前先判定角色与分支；产品在 prototype 分支可直接修改 apps/mindx，生产分支仍由研发维护
+alwaysApply: true
+enabled: true
+updatedAt: 2026-07-11T00:00:00.000Z
+provider:
+---
+
+# 角色与分支权限
+
+MindX 有两类协作者：
+
+1. **开发者**：维护生产代码、数据模型、接口、工程基建与发布流程。
+2. **产品经理/设计师**：以 Issue 为需求契约；刚提出的想法进入`需求池`，需要交互探索时才在一次性 prototype 分支直接修改真实 `apps/mindx` 页面，产出可执行设计证据。
+
+## 角色判定
+
+1. 用户明确说“我是设计师 / 产品经理 / 研发 / 开发者”时，以用户声明为准。
+2. 否则读取 `git config user.name`，与 `.vibe/developer-allowlist.json` 的 `developers[].username` 比对：命中为开发者，未命中为产品/设计师。
+3. 开发者白名单只维护在 `.vibe/developer-allowlist.json`，禁止复制出第二份权威名单。
+
+## 先判分支，再判写权限
+
+每次准备修改文件前先执行：
+
+```bash
+git branch --show-current
+```
+
+### 产品/设计师在 `prototype/<issue>-<slug>`
+
+允许：
+
+- 直接修改 `apps/mindx/**`，包括生产页面、组件、hooks 与样式；这正是 prototype 的目标。
+- 修改 `packages/ui-components/**` 作为设计证据，但仍须遵守纯 UI 原子组件边界。
+- 使用 `prototype.config.json` 与 `apps/mindx/src/prototype/**` 中由脚手架生成的 mock/runtime。
+- 为 prototype UI 增加必要依赖；依赖改动同样只是设计证据，不自动进入生产。
+- 在产品请求分享时，由 AI 通过 `prototype-deploy` 从 dirty worktree build、verify、package 并覆盖 Issue 唯一 Page，不 commit/push；冻结时才走 `prototype-handoff`，由其调用 checkpoint route 固定最近分享 tree。
+
+约束：
+
+- Issue 的结构化验收标准是唯一业务契约；prototype 代码只是可执行设计证据。
+- 必须遵守现有页面目录、类型、lint、组件与 Record 使用规范，保证代码对后续研发有参考价值。
+- 业务数据只能在 prototype transport mock 层模拟；不得为了原型改写 `packages/core-data/**` 的生产数据模型。
+- prototype 分支永不建 PR、永不 merge、永不作为研发分支基点，也不得整分支 cherry-pick。
+
+### 产品/设计师不在 prototype 分支
+
+- `main`、`feature/**`、`bugfix/**`、`hotfix/**` 上禁止产品直接写生产代码。
+- 要做新需求或原型时，强制路由到 `prototype-workflow`：校验/创建 Issue 后，从最新 `origin/main` 创建 `prototype/<issue>-<slug>`。
+- “只是微调”“绝对安全”“先改了再切分支”都不能绕过这一条。
+
+### 开发者
+
+- 生产实现走 `implement-issue`：从最新 `origin/main` 创建全新的 `feature|bugfix/<issue>-<slug>`。
+- prototype 只允许按冻结 SHA 只读学习或选择性复用明确的文件/hunk；禁止 merge、整分支 cherry-pick或把 `src/prototype/**` 带进生产 PR。
+- 工程化任务仍按现有开发者权限与 `[no-issue]` 白名单处理。
+
+## 角色 × skill 路由
+
+| 角色        | 场景                        | 强制 skill                       | 结果                                                    |
+| :---------- | :-------------------------- | :------------------------------- | :------------------------------------------------------ |
+| 产品/设计师 | 仅提需求、记录想法          | `start-feature`                  | Issue=`需求池`；不建分支、不开始原型                    |
+| 产品/设计师 | 开始做、改页面、做原型      | `prototype-workflow`             | Issue=`原型中`；从最新 main 建 prototype；直接改 mindx  |
+| 产品/设计师 | 本地调试、构建预览制品      | `prototype-workflow` + `startup` | `prototype:dev` / `prototype:build`；不上传             |
+| 产品/设计师 | 原型交付研发、需求评审      | `prototype-handoff`              | 逐 AC 交叉验证并冻结证据；通过后=`待研发`               |
+| 开发者      | 实现 Issue / 参考 prototype | `implement-issue`                | 最新 main 上新建生产分支；Issue=`开发中`                |
+| 任意        | 分享 prototype              | `prototype-deploy`               | dirty tree build/verify/package + 覆盖同一 Page；零提交 |
+| 产品/设计师 | 冻结 / 交付 prototype       | `prototype-handoff`              | 最近分享 tree commit + 普通 push；零 PR                 |
+| 开发者      | 提交生产实现                | `cmd-publish` production route   | 创建生产 PR；merge 后=`待发布`                          |
+
+## 五态状态机
+
+```text
+需求池 --需求澄清--> 待研发
+需求池 --开始原型--> 原型中
+原型中 --prototype-handoff PASS--> 待研发
+待研发 --研发认领并创建生产分支--> 开发中
+开发中 --生产 PR merged--> 待发布
+待发布 --发布后 changelog--> 已发布 + closed
+```
+
+- prototype review 是 handoff 门禁，不新增“评审中”状态。
+- 验收写入 AC、评论和正式交付证据；未完成或不通过时保持`开发中`，不新增状态。
+- 负责人：`需求池`、`原型中`归创建人；`待研发`未指定时归`leoricxu`；`开发中`、`待发布`、`已发布`归对应研发。
+- 无需原型的研发任务在需求澄清后进入`待研发`；研发认领并创建生产分支后才进入`开发中`。
+- `待二次加工` 已退役，不再写入新 Issue。
+
+## Commit 约束
+
+- 产品/设计师所有 commit 必须带真实 `#<issueid>`。
+- prototype commit 的 Issue ID 必须与分支中的 Issue ID 一致。
+- prototype 分支禁用 `[no-issue]`。
+- 其它细则由 `issue-binding-route.mdc` 与 commit hook 兜底。

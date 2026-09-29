@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(git:*)",
+      "Bash(pnpm:*)",
+      "Bash(npm:*)",
+      "Bash(node:*)",
+      "Bash(chmod:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(echo:*)",
+      "Bash(date:*)",
+      "Bash(which:*)",
+      "Bash(pwd:*)",
+      "Bash(cd:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /:*)",
+      "Bash(sudo:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(~/.ssh/**)",
+      "Edit(**/*.env)",
+      "Edit(**/*.key)",
+      "Edit(**/*.pem)"
+    ],
+    "subagentPermissionMode": "bypassPermissions"
+  },
+  "trustAll": true
+}

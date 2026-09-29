@@ -1,0 +1,141 @@
+---
+description: 任何分支同步 / 冲突解决类操作（git rebase / git merge / git cherry-pick / git checkout --theirs|--ours）在真正执行前必须先过 ConflictResolver 闸门——必须存在 [ConflictResolver] 声明并已加载 conflict-resolver skill。本规则独立于 dev-workflow 与 user-role，专管"git 历史改写 + 冲突解决"这一组高危动作。
+alwaysApply: true
+enabled: true
+updatedAt: 2026-05-21T19:21:00.000Z
+provider:
+---
+
+# ⛔ ConflictResolver 强制路由（git 改写历史前必检 · 独立闸门）
+
+本规则是**独立的高危动作闸门**，只管"任何会改写 git 历史或挑选冲突边的命令"这一件事。不管 dev-workflow 的代码分档，不管 user-role 的 SOP 基建（那是各自规则的职责）。
+
+**三个闸门彼此独立**：dev-workflow / user-role / conflict-resolver 任一失手不影响其它生效。
+
+## ⚡ 快速路径 / 短路提示
+
+**本闸门只在准备执行「改写历史 / 选边」类命令时才需要声明。** 判定顺序：
+
+1. 普通 `git add` / `git commit -m` / `git push origin <branch>`（正向推送、非 force）→ 本规则**不生效**，无需 `[ConflictResolver]` 声明。
+2. 只有当命令是 `git rebase` / `git merge`（含 `--ff-only`）/ `git cherry-pick` / `git checkout --theirs|--ours` / `git reset --hard <非 HEAD>` / `git push --force[-with-lease]` 时才必须先输出声明并加载 skill。
+3. 若 `cnb pulls get-pull` 返回 `merge_status == cannot_be_merged`、或本地 `git status` 显示 `Unmerged paths`，即使用户没主动要求，也命中本闸门。
+
+同一场景一次授权就够，后续 `git rebase --continue` / `git rebase --abort` 无需重新声明。
+
+## 🔴 硬约束（不可绕过）
+
+### 约束 0：prototype 历史隔离（最高优先级）
+
+**本约束必须先于 `[ConflictResolver]` 声明、用户授权、`git fetch`、behind/ahead 判定和任何 fast-forward 路径执行。授权不能豁免。**
+
+先用只读命令解析当前分支、权威目标分支和本次操作的全部 source ref；解析期间禁止 fetch 或改写历史。将 `refs/heads/`、`refs/remotes/origin/`、`origin/` 前缀归一化后，命中任一条件即硬停：
+
+- 当前分支匹配 `prototype/**`：拒绝 rebase、merge（包括 `--ff-only`）、cherry-pick、reset、选边和 force push。prototype 分支只允许正常 commit 和非 force push。
+- 解析出的 `BASE` 或 source ref 匹配 `prototype/**`：拒绝操作；不得把分支名换成 remote ref、refspec 或其已知 commit SHA 绕过。
+- 任何 merge / rebase / cherry-pick 的 source ref 匹配 `prototype/**`：无论当前分支、冲突状态、用户授权或是否可 fast-forward，都必须拒绝。
+
+生产分支只能同步到它的**合法非 prototype target**：以 PR `target_branch` 为权威；无 PR 时依次使用 `.vibe/active-route.target_branch`、`.vibe/branch-routes.json` 的匹配路由和 `main`。调用方显式传入的 `base_branch` 只是请求值，必须与该权威目标一致，否则硬停。
+
+硬停后只允许给出替代路径：保存 prototype 走正常 commit/push；研发实现走 `implement-issue`，从最新 `main` 新建生产分支。禁止继续 Phase 0，也禁止先 fetch “看看能否快进”。
+
+### 约束 1：心理锚点（每次跑 rebase/merge 前必问自己）
+
+**在调用 `execute_command` 执行以下任意命令之前**，必须在脑中完成自问：
+
+> **"我是否已在本次会话中输出过 `[ConflictResolver] 场景=<触发场景>，授权=<用户回复内容>` 的声明，并已 use_skill 加载 conflict-resolver？"**
+
+受约束的命令清单（命中即必须声明 + 加载 skill）：
+
+- `git rebase ...`（含 `--continue` / `--abort` 之外的任何子动作）
+- `git merge ...`（包括 `--ff-only`、`--no-ff` 与三向合并；fast-forward 也会移动分支历史）
+- `git cherry-pick ...`
+- `git checkout --theirs <file>` / `git checkout --ours <file>`
+- `git reset --hard <非当前HEAD的ref>`（会丢失本地改动）
+- `git push --force` / `git push --force-with-lease`（rebase 之后的推送）
+
+- ✅ 已声明 + 已加载 → 可以继续
+- ❌ 否 → 立即停止，先加载 `conflict-resolver` skill，按 skill 的 Phase 0 走用户授权确认
+
+### 约束 2：反向触发（可证伪的行为闸门）
+
+**调用上述任一命令之前**，本次会话历史中**必须已存在**一条以 `[ConflictResolver]` 开头的助手输出。
+
+- 本约束是**可证伪的**：只需 grep 会话有无 `[ConflictResolver]` 开头的段落
+- 若不存在 → **立即停止**，加载 `conflict-resolver` skill 后补输出声明
+- 声明格式（强制）：`[ConflictResolver] 场景=<触发场景代号>，目标分支=<BASE>，授权=<用户原话或"内部cmd-publish调用">`
+
+### 约束 3：自我翻盘禁令（专门防"AI 看图片自我授权"）
+
+如果 AI 在本次会话中**5 分钟内**说过下列任一意思：
+
+- "需要研发帮忙 rebase / 解冲突"
+- "由于 git fetch 有认证限制 / 没有权限"
+- "建议你在 CNB Web 上手动解决"
+- "这个我处理不了 / 我不能直接动 git"
+
+那么**禁止**在没有用户**明确的文字授权**的情况下翻盘动手。
+用户**仅贴图、仅发表情、仅发文件名、仅说"嗯/好/那"** —— 一律视为**不够明确**，必须先问 A/B/C 选项（见 conflict-resolver skill 的 Phase 0）。
+
+> "用户授权"的合格样例（必须是文字 + 显式动作意图）：
+>
+> - "你来 rebase"
+> - "你解一下冲突"
+> - "选 A"
+> - "/resolve-conflicts"
+>
+> "用户授权"的不合格样例（不得视为授权）：
+>
+> - 只贴 MR 截图
+> - 只发"有冲突吗 / 看看有没有"等疑问句
+> - 只说"嗯 / 好的"
+> - 沉默
+
+### 约束 4：禁止 --no-verify 推送 rebase 后的 commit
+
+`conflict-resolver` skill Phase 5.0 是 push 前的**最后一道**冲突标记残留扫描。若你 commit 时加了 `--no-verify`，会同时跳过 husky pre-commit 中的相关校验，**视同绕过 Phase 5.0**。
+
+- ⛔ 禁止在 rebase / merge / cherry-pick 后的 commit 中使用 `--no-verify`
+- 唯一豁免：用户明确说过"加 --no-verify" 且当前操作与冲突解决无关
+
+## 🧭 触发场景代号
+
+`[ConflictResolver] 场景=<代号>` 中的代号取以下之一：
+
+| 代号                   | 含义                                                         |
+| :--------------------- | :----------------------------------------------------------- |
+| `user-explicit`        | 用户文字明确要求（"解冲突"/"rebase"/"同步主干"）             |
+| `cmd-publish-internal` | `cmd-publish` skill Step 1.4 或 Step 3 内部调用              |
+| `cnb-cannot-merged`    | 通过 CNB 查询到 PR `merge_status == cannot_be_merged`        |
+| `git-unmerged-paths`   | `git status` 显示 `Unmerged paths`                           |
+| `pre-action`           | 即将主动跑 `git rebase` / `git checkout --theirs` 等高危动作 |
+
+## ✅ 违规自查（动作后回头检查）
+
+如果发现本次会话中**已经跑过** `git rebase` / `git checkout --theirs` 等命令，但之前没有 `[ConflictResolver]` 开头的声明 → 视为违规，必须：
+
+1. 立即**停止**后续 push
+2. 加载 `conflict-resolver` skill
+3. 跑 skill 的 Phase 5.0 残留扫描
+4. 输出补档声明：`[ConflictResolver] 场景=pre-action（违规补档：未经声明已执行高危命令），目标分支=<BASE>，授权=待用户确认`
+5. 等用户确认后才能 push
+
+> 补档**不能掩盖事故**：若残留扫描发现冲突标记已被 commit，必须告知用户并提供 `git reset --soft <rebase前 ref>` 的回滚方案。
+
+## 📚 配套机制
+
+- 详细 Phase 编排：`.codebuddy/skills/conflict-resolver/SKILL.md`
+- 故障案例库：`.codebuddy/skills/conflict-resolver/reference/case-incidents.md`
+- 服务端兜底：`.husky/pre-push`（冲突标记残留扫描）
+- 出口管线衔接：`.codebuddy/skills/cmd-publish/SKILL.md` Step 1.4 / Step 3.4
+
+## 🧩 与其它机制的关系（解耦说明）
+
+| 机制                            | 职责                                   | 与本规则的关系                            |
+| :------------------------------ | :------------------------------------- | :---------------------------------------- |
+| `dev-workflow.mdc`              | 代码改动分档 + Agent Team 派发         | **独立** — 本规则不依赖代码档位           |
+| `user-role.mdc`                 | 角色判定 + SOP 物理基建                | **独立** — 本规则对所有角色一视同仁       |
+| `component-migration-route.mdc` | ui-components 组件改动前必检的独立闸门 | **独立** — 不同动作集，互不依赖           |
+| `conflict-resolver` skill       | 实际执行 rebase + 冲突解决 + 验证闭环  | 本规则强制其加载，但不替代其 Phase 编排   |
+| `.husky/pre-push`               | 服务端兜底扫描冲突标记                 | 本规则的"最后一道墙"，AI 怎么乱搞都拦得住 |
+
+**设计原则**：AI 在 git 历史改写类高危动作上有"用最短命令完成任务"的天然倾向（5/21 的事故就是典型）。本规则作为强制声明 + 用户授权 + skill 加载的三重闸门，让"裸 git 命令一把梭"在本仓库内**结构性不可行**。

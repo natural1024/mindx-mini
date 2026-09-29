@@ -1,0 +1,65 @@
+#!/usr/bin/env sh
+# pre-commit hook
+# 1. lint-staged：格式化 + lint 暂存改动
+# 2. i18n staged 中文字符串校验
+# 3. ui-components 业务组件新增校验（docs/ui-components/atomic-component-criteria.md）
+# 4. 路由冲突与 reporter 依赖校验
+#
+# 性能：pre-commit 只跑 staged 级别检查；全量 install/typecheck/lint/test 放在 pre-push。
+# 失败处理：任何脚本退出码非 0 → 阻塞 commit。
+#
+# 如果需要紧急绕过：git commit --no-verify（不推荐，会跳过所有校验）。
+
+# 1. lint-staged
+npx lint-staged || exit 1
+
+# 2. i18n staged 中文字符串校验
+node scripts/workflow/check-i18n-literals.mjs
+I18N_EXIT=$?
+if [ "$I18N_EXIT" = "1" ]; then
+  echo ""
+  echo "❌ pre-commit 拦截：i18n 校验失败。详见上方报告。"
+  exit 1
+fi
+
+# 3. ui-components 业务组件新增校验（默认对比 origin/main...HEAD）
+#    如本地 origin/main 缺失（如新 clone 未 fetch），脚本会以退出码 2 优雅 abort，pre-commit 容错放行。
+node scripts/workflow/check-ui-components-additions.mjs
+UI_COMPONENTS_EXIT=$?
+if [ "$UI_COMPONENTS_EXIT" = "1" ]; then
+  echo ""
+  echo "❌ pre-commit 拦截：ui-components 校验失败。详见上方报告。"
+  exit 1
+fi
+
+# 4. mindx 路由冲突校验（USE_STAGED 模式：仅扫描 staged 改动涉及的路由文件）
+#    禁止 /tim, /api, /scenario, /components/docs 开头的前端路由
+USE_STAGED=1 node scripts/workflow/check-route-conflicts.mjs
+ROUTE_CONFLICT_EXIT=$?
+if [ "$ROUTE_CONFLICT_EXIT" = "1" ]; then
+  echo ""
+  echo "❌ pre-commit 拦截：存在禁止前缀路由（/tim, /api, /scenario, /components/docs）。详见上方报告。"
+  exit 1
+fi
+
+# 5. @mindx/reporter 依赖类型校验：共享包必须 peerDep，禁止 deps/devDeps
+node scripts/workflow/check-reporter-dependency-type.mjs
+REPORTER_DEP_EXIT=$?
+if [ "$REPORTER_DEP_EXIT" = "1" ]; then
+  echo ""
+  echo "❌ pre-commit 拦截：@mindx/reporter 依赖类型违规。详见上方报告。"
+  exit 1
+fi
+
+# 6. 字号/间距 Token 消费校验（仅校验 staged 新增行）
+#    font-size / margin / padding / gap / width / height / top / left / bottom / right 等
+#    必须用 var(--xxx) / calc() / rem / %，禁止裸字面 px 值
+USE_STAGED=1 node scripts/workflow/check-font-size-token-usage.mjs
+FONT_TOKEN_EXIT=$?
+if [ "$FONT_TOKEN_EXIT" = "1" ]; then
+  echo ""
+  echo "❌ pre-commit 拦截：字号/间距属性未使用 Token / calc / rem / %。详见上方报告。"
+  exit 1
+fi
+
+exit 0

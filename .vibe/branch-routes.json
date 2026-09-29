@@ -1,0 +1,16 @@
+{
+  "$schema": "分支路由配置 — 由开发者维护，控制不同需求的 feature 分支基点和 MR 合入目标",
+  "routes": [
+    {
+      "id": "main",
+      "name": "研发主干",
+      "description": "生产实现从 main 创建 feature/bugfix 并合回 main；产品原型从 main 创建不可合并的 prototype 分支",
+      "target_branch": "main",
+      "source_branch": "main"
+    }
+  ],
+  "default_route": {
+    "developer": "main",
+    "designer": "main"
+  }
+}

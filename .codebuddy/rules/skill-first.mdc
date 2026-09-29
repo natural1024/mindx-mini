@@ -1,0 +1,23 @@
+---
+description: 收到需求时必须先扫描 available skills，优先使用 skill 而非自行探索
+globs:
+alwaysApply: true
+---
+
+# Skill 优先原则
+
+开始探索、修改或 Git 操作前，先匹配 available skills；命中时必须完整读取并执行对应 skill。
+
+优先路由：
+
+- 产品提需求、开始原型、直接改 `apps/mindx` → `prototype-workflow`
+- 原型评审、交付研发、冻结预览/SHA → `prototype-handoff`
+- 研发实现 Issue、参考 prototype → `implement-issue`
+- prototype 或生产代码提交/push/PR → `cmd-publish`（由分支决定出口；prototype 永不建 PR）
+- 本地启动 → `startup`（由分支决定 MindX prototype / production）
+- 页面与 UI → `ui-development`
+- 编辑器、文档、block、插件 → `smart-doc-editor-upgrade`
+- 代码修改统一分档 → `dev-workflow`
+- 发布后收尾 → `changelog`
+
+旧流程措辞中的“同步代码”若实际要求生产实现，应按 Issue 路由到 `implement-issue`；不得从非生产证据整段 cherry-pick。

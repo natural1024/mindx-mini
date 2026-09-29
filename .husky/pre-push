@@ -1,0 +1,206 @@
+#!/usr/bin/env sh
+# pre-push hook：仓库级最后防线（堵 AI 把冲突标记 push 到远端）
+#
+# 设计动机：
+#   2026-05-21 发生过一次"AI 用 --theirs 一把梭解冲突 + git commit --no-verify
+#   + git push --force-with-lease"导致 <<<<<<< 标记污染 origin/sandbox 的事故。
+#   pre-commit 可以被 --no-verify 跳过，但 pre-push 是 commit 已落盘后的最后一道墙。
+#   即便 AI 把整个 conflict-resolver SOP 都绕过，本 hook 也能在 push 出去之前拦住。
+#
+# 性能：本 hook 会跑全量 install/typecheck/lint/test，耗时取决于当前工作区状态。
+# 失败处理：任何脚本退出码非 0 → 阻塞 push。
+#
+# 紧急绕过：git push --no-verify（不推荐，仅当你 100% 确认是误报且立即修复）。
+
+# pre-push 的待推送 ref 列表来自 stdin。所有角色先缓存并保护 frozen evidence ref；
+# 这一步必须发生在开发者轻量路径之前，避免 update/delete 被直接放行。
+PUSH_REFS_FILE=$(mktemp -t mindx-pre-push-refs.XXXXXX) || exit 1
+cat > "$PUSH_REFS_FILE"
+trap 'rm -f "$PUSH_REFS_FILE"' EXIT
+node scripts/workflow/check-protected-ref-push.mjs < "$PUSH_REFS_FILE" || exit 1
+
+# 开发者本地 push 走轻量路径：完整检查迁移到 CNB PR 流水线统一兜底。
+# 非开发者维持原 pre-push 行为。
+GIT_USER_NAME=$(git config user.name 2>/dev/null || true)
+IS_DEVELOPER=$(GIT_USER_NAME="$GIT_USER_NAME" node -e '
+const fs = require("node:fs");
+const username = process.env.GIT_USER_NAME || "";
+try {
+  const allowlist = JSON.parse(fs.readFileSync(".vibe/developer-allowlist.json", "utf8"));
+  const developers = Array.isArray(allowlist.developers) ? allowlist.developers : [];
+  process.stdout.write(developers.some((item) => item && item.username === username) ? "1" : "0");
+} catch {
+  process.stdout.write("0");
+}
+')
+
+if [ "$IS_DEVELOPER" = "1" ]; then
+  echo "✅ pre-push: developer '$GIT_USER_NAME' detected, skipping local checks. CNB PR pipeline will run the full gate."
+  exit 0
+fi
+
+# === 信号兜底：Ctrl+C 时杀掉所有子进程 ===
+# 问题：git push 收到 SIGINT 后会立即退出，但 hook 里启动的 pnpm / nx / tsc /
+#       vitest 等子进程可能脱离前台进程组（pnpm 启动 nx 子任务时会创建新进程组），
+#       SIGINT 传不到它们，导致 git 已退出但子进程仍在 100% CPU 跑。
+# 方案：两层兜底
+#   1) trap INT/TERM：收到信号时主动向整个进程组（PGID=$$）发 SIGKILL，
+#      覆盖所有同进程组子进程（pnpm / node / tsc 同组都能杀到）。
+#   2) watchdog：后台监控父进程（git push）是否还在，一旦 git 退出立即 kill 0，
+#      处理"git 先退、hook 没收到信号"的孤儿场景。
+kill_tree() {
+  trap - INT TERM EXIT
+  # 先 SIGINT 给清理机会，再 SIGKILL 兜底
+  kill -INT 0 2>/dev/null
+  sleep 0.3
+  kill -KILL 0 2>/dev/null
+  exit 130
+}
+trap 'kill_tree' INT TERM
+
+# watchdog：父进程退出后主动 kill
+(
+  while kill -0 "$PPID" 2>/dev/null; do
+    sleep 0.5
+  done
+  # 父进程（git）已消失，立即杀掉整个进程组
+  kill -KILL 0 2>/dev/null
+) &
+WATCHDOG_PID=$!
+# hook 正常退出时也要回收 watchdog
+trap 'kill "$WATCHDOG_PID" 2>/dev/null; rm -f "$PUSH_REFS_FILE"' EXIT
+
+# === 前置检查：依赖 / 类型 / 代码规范 / 测试必须通过 ===
+echo "📦 pre-push: checking pnpm install --frozen-lockfile..."
+pnpm install --frozen-lockfile
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "⛔ pre-push 拦截：pnpm install --frozen-lockfile 未通过，请修复依赖/lockfile 后再 push"
+  echo ""
+  exit 1
+fi
+
+echo "🔎 pre-push: running pnpm typecheck..."
+pnpm typecheck
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "⛔ pre-push 拦截：pnpm typecheck 未通过，请修复类型错误后再 push"
+  echo ""
+  exit 1
+fi
+
+echo "🧹 pre-push: running pnpm lint..."
+pnpm lint
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "⛔ pre-push 拦截：pnpm lint 未通过，请修复 ESLint/Stylelint 问题后再 push"
+  echo ""
+  exit 1
+fi
+
+echo "🧪 pre-push: running pnpm test..."
+pnpm test
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "⛔ pre-push 拦截：pnpm test 未通过，请修复测试后再 push"
+  echo ""
+  exit 1
+fi
+
+# 显式关闭 sh -e：本脚本里 grep 无匹配返回 1 是预期行为，不应触发 husky 包装层的 -e 退出
+set +e
+
+# 从缓存文件读取 push 列表：<local_ref> <local_sha> <remote_ref> <remote_sha>
+# 对每条 push 做扫描
+FAILED=0
+while read local_ref local_sha remote_ref remote_sha; do
+  # 删除分支推送，跳过
+  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # 确定扫描范围：
+  #   - 新分支首推（remote_sha 全 0）→ 扫 local_sha..HEAD 这一支的所有 commit 改动文件
+  #   - 已有分支更新 → 扫 remote_sha..local_sha 这次 push 新增的 commit 改动文件
+  #   - remote_sha 对象在本地不存在（remote 超前于本地，push 必然被拒绝）→ 降级为单 commit 扫描
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # 新分支首推 - 只扫描本次 push 的 HEAD（避免扫到上游历史）
+    RANGE="$local_sha"
+    SCAN_MODE="single-commit"
+  elif ! git cat-file -e "$remote_sha" 2>/dev/null; then
+    # remote 超前于本地（本地未 fetch / fast-forward 失败前置）→ 只扫本次新增 commit 的 HEAD
+    # 反正 push 也会被远端拒绝，hook 不需要在这里报错
+    RANGE="$local_sha"
+    SCAN_MODE="single-commit"
+  else
+    RANGE="$remote_sha..$local_sha"
+    SCAN_MODE="range"
+  fi
+
+  # === 扫描 1：冲突标记残留（所有分支均阻塞）===
+  # 取本次 push 范围内变更的文件列表（过滤常见可扫描的代码 / 文本类型）
+  if [ "$SCAN_MODE" = "single-commit" ]; then
+    CHANGED_FILES=$(git show --pretty="" --name-only "$RANGE" 2>/dev/null \
+      | grep -E '\.(ts|tsx|js|jsx|cjs|mjs|less|css|scss|json|md|yaml|yml|html|sh|toml)$' \
+      | grep -v "^node_modules/\|^\.git/\|^dist/\|/dist/")
+  else
+    CHANGED_FILES=$(git diff --name-only "$RANGE" 2>/dev/null \
+      | grep -E '\.(ts|tsx|js|jsx|cjs|mjs|less|css|scss|json|md|yaml|yml|html|sh|toml)$' \
+      | grep -v "^node_modules/\|^\.git/\|^dist/\|/dist/")
+  fi
+
+  if [ -n "$CHANGED_FILES" ]; then
+    # 对每个变更文件检查冲突标记（用真实仓库文件，因为已 commit 落盘）
+    CONFLICT_HITS=""
+    for f in $CHANGED_FILES; do
+      if [ -f "$f" ]; then
+        # 检测 git 冲突标记的三件套行（行首匹配）
+        if grep -lE '^<<<<<<<|^=======$|^>>>>>>>' "$f" >/dev/null 2>&1; then
+          CONFLICT_HITS="$CONFLICT_HITS\n  - $f"
+        fi
+      fi
+    done
+
+    if [ -n "$CONFLICT_HITS" ]; then
+      echo ""
+      echo "⛔ pre-push 拦截：检测到 git 冲突标记残留"
+      echo ""
+      echo "目标分支：$remote_ref"
+      echo "受影响文件："
+      printf "$CONFLICT_HITS\n"
+      echo ""
+      echo "处理建议："
+      echo "  1. 逐文件打开 → 决定保留哪一边 → 删除 <<<<<<< ======= >>>>>>> 标记行"
+      echo "  2. git add 修复后的文件"
+      echo "  3. git commit --amend  （把修复并入最后一个 commit）"
+      echo "  4. 再次 git push"
+      echo ""
+      echo "若你是 AI，请按 .codebuddy/skills/conflict-resolver/SKILL.md Phase 5.0 处理。"
+      echo ""
+      echo "（紧急绕过：git push --no-verify，仅当你 100% 确认是误报。）"
+      FAILED=1
+    fi
+  fi
+
+  # === 扫描 2：检测本次 push 中带 [ConflictResolver-Violation] 标记的 commit ===
+  # 当 AI 检测到自己违规时（conflict-resolver-route.mdc 约束 4），会在 commit message 打这个标记
+  # 不主动阻断（毕竟用户可能就是要推违规补档），只给一个警告
+  if [ "$SCAN_MODE" = "range" ]; then
+    VIOLATION_COMMITS=$(git log --pretty=format:"%h %s" "$RANGE" 2>/dev/null \
+      | grep -E '\[ConflictResolver-Violation\]' || true)
+    if [ -n "$VIOLATION_COMMITS" ]; then
+      echo ""
+      echo "⚠️  pre-push 告警：本次 push 包含 ConflictResolver 违规补档 commit："
+      echo "$VIOLATION_COMMITS"
+      echo ""
+      echo "请确认你已经按 conflict-resolver-route.mdc 违规自查流程完成补救。"
+      echo ""
+    fi
+  fi
+done < "$PUSH_REFS_FILE"
+
+if [ "$FAILED" = "1" ]; then
+  exit 1
+fi
+
+exit 0

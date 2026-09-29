@@ -1,0 +1,1036 @@
+include:
+  - .ci/mindx-release.yml
+
+$:
+  # Issue 创建时通知研发群（issue 事件只能挂在 $ 下，取默认分支配置）。
+  issue.open:
+    - name: MindX issue open notify
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      stages:
+        - name: notify dev group on issue open
+          script: node scripts/workflow/notify-dev-group.mjs
+
+  # Fallback selector for PR targets not covered by an explicit branch rule.
+  # pull_request.target checks out trusted target-branch code.
+  pull_request.target:
+    - name: Reject prototype PRs on fallback targets
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Reject prototype PRs
+          script: node scripts/workflow/check-prototype-pr-policy.mjs
+
+main:
+  # CNB generic PR 事件兼容兜底：仅用于保证配置可解析，不重复执行 target/update 检查。
+  # 该事件运行预合并代码，禁止注入密钥或执行有副作用的操作。
+  pull_request:
+    - name: MindX generic PR compatibility
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Validate generic PR configuration
+          script: echo "Generic pull_request configuration is valid"
+
+  # 单独的 prototype 守卫 job，前置到 target 事件的最前面；其它 job 不再重复。
+  # 参考 docs/prototype-workflow.md 与 scripts/workflow/check-prototype-pr-policy.mjs
+  pull_request.target:
+    - name: MindX PR prototype guard
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Reject prototype PRs
+          script: node scripts/workflow/check-prototype-pr-policy.mjs
+
+    # target 事件使用目标分支可信配置与 trigger token，只做秒级异步派发。
+    # gpt-5.5 的慢评审在独立 api_trigger 子流水线运行，不占用普通 PR 检查。
+    - name: MindX PR review dispatch
+      docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: Dispatch async MindX PR review
+          script: |
+            set -eu
+
+            case "${CNB_PULL_REQUEST_IS_WIP:-false}" in
+              true|1)
+                echo "Skip MindX NPC review: PR #$CNB_PULL_REQUEST_IID is WIP"
+                exit 0
+                ;;
+            esac
+
+            command -v cnb >/dev/null
+            command -v jq >/dev/null
+
+            REVIEW_TRIGGER_DATA="$(jq -nc \
+              --arg branch "${CNB_BRANCH:-main}" \
+              --arg sha "$CNB_PULL_REQUEST_TARGET_SHA" \
+              --arg iid "$CNB_PULL_REQUEST_IID" \
+              --arg headSha "$CNB_PULL_REQUEST_SHA" \
+              --arg targetSha "$CNB_PULL_REQUEST_TARGET_SHA" \
+              --arg sourceBranch "$CNB_PULL_REQUEST_BRANCH" \
+              --arg sourceSlug "$CNB_PULL_REQUEST_SLUG" \
+              --arg repoSlug "$CNB_REPO_SLUG" \
+              '{
+                branch: $branch,
+                sha: $sha,
+                event: "api_trigger_mindx_pr_review",
+                title: ("MindX PR #" + $iid + " NPC review"),
+                sync: false,
+                npc: {name: "CodeBuddy", workMode: false},
+                env: {
+                  MINDX_REVIEW_PR_IID: $iid,
+                  MINDX_REVIEW_PR_HEAD_SHA: $headSha,
+                  MINDX_REVIEW_PR_TARGET_SHA: $targetSha,
+                  MINDX_REVIEW_SOURCE_BRANCH: $sourceBranch,
+                  MINDX_REVIEW_SOURCE_SLUG: $sourceSlug,
+                  MINDX_REVIEW_REPO_SLUG: $repoSlug
+                }
+              }')"
+
+            cnb build start-build \
+              --repo "$CNB_REPO_SLUG" \
+              --data "$REVIEW_TRIGGER_DATA"
+
+    - name: MindX PR open notify
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      stages:
+        - name: notify dev group on PR open
+          script: node scripts/workflow/notify-dev-group.mjs
+
+    - name: MindX PR default reviewers
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: add default PR reviewers
+          script: |
+            set -e
+            if [ "$CNB_PULL_REQUEST_ACTION" != "opened" ]; then
+              echo "Skip default reviewers: action=$CNB_PULL_REQUEST_ACTION"
+              exit 0
+            fi
+
+            # 自动化 changelog PR 由 api_trigger_changelog 流水线自我 approve，
+            # 不需要人肉 reviewer 参与，跳过默认 reviewer 分配以避免占用他人待办。
+            case "$CNB_PULL_REQUEST_BRANCH" in
+              chore/changelog-*)
+                echo "Skip default reviewers: automated changelog PR ($CNB_PULL_REQUEST_BRANCH)"
+                exit 0
+                ;;
+            esac
+
+            if ! command -v cnb >/dev/null 2>&1; then
+              npm install -g @cnbcool/cnb-cli
+            fi
+
+            cnb pulls post-pull-reviewers \
+              --repo "$CNB_REPO_SLUG" \
+              --number "$CNB_PULL_REQUEST_IID" \
+              --reviewers tiggersxliu \
+              --reviewers aikenyan \
+              --reviewers hildahou \
+              --reviewers stevenyzliu \
+              --reviewers cikeypeng
+
+    - name: MindX PR Issue contract
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Validate referenced Issue read-only
+          script: node scripts/workflow/check-pr-issue-contract.mjs
+
+  pull_request.update:
+    - name: MindX PR checks
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        # 只运行一次 prototype guard（与 pull_request.target 的 MindX PR prototype guard 互补）。
+        # untrusted PR update 事件必须用轻量分支名/lineage 判定，不能访问 secrets 或 CNB API。
+        - name: Reject prototype PRs
+          script: node scripts/workflow/check-prototype-pr-policy.mjs
+
+        - name: Compute DIFF_BASE_SHA
+          script: |
+            set -e
+            echo "CNB_REPO_SLUG=${CNB_REPO_SLUG}"
+            echo "CNB_BRANCH=${CNB_BRANCH}"
+            echo "CNB_PULL_REQUEST_IID=${CNB_PULL_REQUEST_IID}"
+            echo "CNB_PULL_REQUEST_BRANCH=${CNB_PULL_REQUEST_BRANCH}"
+            echo "CNB_PULL_REQUEST_SHA=${CNB_PULL_REQUEST_SHA}"
+            echo "CNB_PULL_REQUEST_TARGET_SHA=${CNB_PULL_REQUEST_TARGET_SHA}"
+            echo "CNB_PULL_REQUEST_PROPOSER=${CNB_PULL_REQUEST_PROPOSER}"
+
+            git fetch origin "${CNB_BRANCH:-main}" --depth=200
+            git fetch origin "${CNB_PULL_REQUEST_BRANCH}" --depth=200 || true
+
+            BASE="$(git merge-base "$CNB_PULL_REQUEST_TARGET_SHA" "$CNB_PULL_REQUEST_SHA")"
+            if [ -z "$BASE" ]; then
+              echo "DIFF_BASE_SHA calculation failed"
+              exit 1
+            fi
+
+            echo "DIFF_BASE_SHA=$BASE"
+            echo "##[set-output DIFF_BASE_SHA=$BASE]"
+
+            # 只有 scripts/workflow/** 有 diff 时才跑 workflow policy 自身单测，
+            # 避免每次纯业务 PR 都重复跑内部工程测试。
+            WORKFLOW_DIFF="$(git diff --name-only "$BASE...$CNB_PULL_REQUEST_SHA" -- 'scripts/workflow/**' 2>/dev/null || true)"
+            if [ -n "$WORKFLOW_DIFF" ]; then
+              echo "WORKFLOW_SCRIPTS_CHANGED=1"
+              echo "##[set-output WORKFLOW_SCRIPTS_CHANGED=1]"
+            else
+              echo "WORKFLOW_SCRIPTS_CHANGED=0"
+              echo "##[set-output WORKFLOW_SCRIPTS_CHANGED=0]"
+            fi
+          exports:
+            DIFF_BASE_SHA: DIFF_BASE_SHA
+            WORKFLOW_SCRIPTS_CHANGED: WORKFLOW_SCRIPTS_CHANGED
+
+        # 依赖安装：优先复用 CNB runner 上的 pnpm store。CNB YAML 目前没有
+        # 独立的 cache 语法，通过 PNPM_STORE_PATH + config set 让 pnpm 尝试命中
+        # runner 全局 store；若跨构建 store 不持久（CNB 用完 runner 就销毁），
+        # 至少让本次 install 全程使用 --prefer-offline 减少一次网络轮询。
+        - name: pre-merge quality install check
+          script: |
+            set -e
+            export PNPM_STORE_PATH="${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}"
+            mkdir -p "$PNPM_STORE_PATH"
+            pnpm config set store-dir "$PNPM_STORE_PATH" >/dev/null 2>&1 || true
+            pnpm install --frozen-lockfile --prefer-offline
+
+        - name: workflow policy unit tests
+          if: |
+            [ "$WORKFLOW_SCRIPTS_CHANGED" = "1" ]
+          script: node --test scripts/workflow/tests/*.test.mjs
+
+        - name: pre-merge quality typecheck
+          script: pnpm typecheck
+
+        - name: pre-merge quality lint
+          script: pnpm lint
+
+        - name: pre-merge quality test
+          script: pnpm test
+
+        - name: pre-merge quality i18n check
+          script: BASE_REF=$DIFF_BASE_SHA HEAD_REF=$CNB_PULL_REQUEST_SHA CI_MODE=1 node scripts/workflow/check-i18n-consistency.mjs
+
+        - name: pre-merge quality conflict marker scan
+          script: |
+            set -e
+            CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT "$DIFF_BASE_SHA...$CNB_PULL_REQUEST_SHA" 2>/dev/null \
+              | grep -E '\.(ts|tsx|js|jsx|cjs|mjs|less|css|scss|json|md|yaml|yml|html|sh|toml)$' \
+              | grep -v "^node_modules/\|^\.git/\|^dist/\|/dist/" || true)
+
+            if [ -z "$CHANGED_FILES" ]; then
+              echo "No text/code files changed, skip conflict marker scan."
+              exit 0
+            fi
+
+            CONFLICT_HITS=""
+            for f in $CHANGED_FILES; do
+              if git cat-file -e "$CNB_PULL_REQUEST_SHA:$f" 2>/dev/null; then
+                HIT=$(git grep -n -E '^(<<<<<<<|=======$|>>>>>>>)' "$CNB_PULL_REQUEST_SHA" -- "$f" || true)
+                if [ -n "$HIT" ]; then
+                  CONFLICT_HITS="$CONFLICT_HITS\n$HIT"
+                fi
+              fi
+            done
+
+            if [ -n "$CONFLICT_HITS" ]; then
+              echo ""
+              echo "pre-merge quality check failed: detected git conflict markers in PR diff."
+              printf "%b\n" "$CONFLICT_HITS"
+              exit 1
+            fi
+
+            echo "No git conflict markers detected."
+
+        - name: pre-merge quality ConflictResolver violation scan
+          script: |
+            set -e
+            VIOLATION_COMMITS=$(git log --pretty=format:"%h %s" "$DIFF_BASE_SHA..$CNB_PULL_REQUEST_SHA" 2>/dev/null \
+              | grep -E '\[ConflictResolver-Violation\]' || true)
+
+            if [ -n "$VIOLATION_COMMITS" ]; then
+              echo ""
+              echo "pre-merge quality check warning: PR contains ConflictResolver violation marker commits:"
+              echo "$VIOLATION_COMMITS"
+              echo ""
+              echo "This is warning only, not blocking."
+            else
+              echo "No ConflictResolver violation marker commits."
+            fi
+
+        - name: ui-components additions check
+          script: BASE_REF=$DIFF_BASE_SHA HEAD_REF=$CNB_PULL_REQUEST_SHA node scripts/workflow/check-ui-components-additions.mjs
+
+        - name: route conflict check
+          script: node scripts/workflow/check-route-conflicts.mjs
+
+        - name: commit issue reference check
+          script: BASE_REF=$DIFF_BASE_SHA HEAD_REF=$CNB_PULL_REQUEST_SHA CI_MODE=1 node scripts/workflow/check-commit-issue-ref.mjs
+
+        - name: Target-label validation
+          script: BASE_REF=$DIFF_BASE_SHA HEAD_REF=$CNB_PULL_REQUEST_SHA node scripts/workflow/check-mr-sync-status.mjs
+
+        - name: chore no-issue abuse check
+          script: BASE_REF=$DIFF_BASE_SHA HEAD_REF=$CNB_PULL_REQUEST_SHA CI_MODE=1 node scripts/workflow/check-chore-no-issue-abuse.mjs
+
+  # Final read-only Issue check from trusted target code after review/statuses.
+  pull_request.mergeable:
+    - name: MindX mergeable Issue contract
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Reject prototype PRs
+          script: node scripts/workflow/check-prototype-pr-policy.mjs
+
+        - name: Validate referenced Issue read-only
+          script: node scripts/workflow/check-pr-issue-contract.mjs
+
+    # 人工评审通过 + 必需状态检查通过 + 无冲突后，自动合并。
+    # NPC 评审只提供建议，不直接 approve 或调用合并。
+    # 用 merge 而非 squash：保留每个 commit 的 #<issueid>，保证 changelog / issue 追踪不丢。
+    - name: MindX PR auto merge
+      stages:
+        - name: auto merge after review & checks passed
+          type: git:auto-merge
+          options:
+            mergeType: merge
+            removeSourceBranch: true
+
+  pull_request.merged:
+    - name: MindX merged issue sync
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Sync issue labels after merge
+          script: node scripts/workflow/sync-issues-on-branch-merge.mjs
+    - name: MindX PR merged notify
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      stages:
+        - name: notify dev group on PR merged
+          script: node scripts/workflow/notify-dev-group.mjs
+
+  # 由 pull_request.target 秒级异步派发。非 work-mode NPC 只拥有读取上下文、
+  # 发布 comment review 与普通总评评论的最小权限；不会成为普通 PR 的同步状态检查。
+  api_trigger_mindx_pr_review:
+    - name: MindX async NPC PR review
+      docker:
+        image: cnbcool/default-npc:latest
+        # data 卷在本子 Pipeline 的任务容器间共享，结束后由 CNB 自动清理。
+        volumes:
+          - /mindx-pr-review:data
+      sandbox: false
+      lock:
+        key: mindx-pr-review-${MINDX_REVIEW_PR_IID}
+        wait: true
+        cancel-in-progress: true
+        cancel-in-wait: true
+      stages:
+        - name: Validate MindX PR review request
+          script: |
+            set -eu
+            : "${MINDX_REVIEW_PR_IID:?missing MINDX_REVIEW_PR_IID}"
+            : "${MINDX_REVIEW_PR_HEAD_SHA:?missing MINDX_REVIEW_PR_HEAD_SHA}"
+            : "${MINDX_REVIEW_PR_TARGET_SHA:?missing MINDX_REVIEW_PR_TARGET_SHA}"
+            : "${MINDX_REVIEW_SOURCE_BRANCH:?missing MINDX_REVIEW_SOURCE_BRANCH}"
+            : "${MINDX_REVIEW_SOURCE_SLUG:?missing MINDX_REVIEW_SOURCE_SLUG}"
+            : "${MINDX_REVIEW_REPO_SLUG:?missing MINDX_REVIEW_REPO_SLUG}"
+
+            echo "$MINDX_REVIEW_PR_IID" | grep -Eq '^[1-9][0-9]*$'
+            echo "$MINDX_REVIEW_PR_HEAD_SHA" | grep -Eq '^[0-9a-f]{40}$'
+            echo "$MINDX_REVIEW_PR_TARGET_SHA" | grep -Eq '^[0-9a-f]{40}$'
+            test "$MINDX_REVIEW_REPO_SLUG" = "$CNB_REPO_SLUG"
+
+        # 参照 genie mr-review collector：先固定 Git 权威 diff，再补充平台元数据。
+        - name: Collect deterministic MindX PR review context
+          script: |
+            set -eu
+            python3 .codebuddy/skills/mindx-pr-review/scripts/collect-pr-context.py collect \
+              --context-file /mindx-pr-review/context.json \
+              --changed-paths-file /mindx-pr-review/changed-paths.txt \
+              --diff-file /mindx-pr-review/review.diff
+
+            test -s /mindx-pr-review/context.json
+            test -f /mindx-pr-review/changed-paths.txt
+            test -f /mindx-pr-review/review.diff
+
+        - name: Review and publish current PR
+          type: npc:go
+          options:
+            model: gpt-5.5
+            contextWindow: 256k
+            # PR #1306 在 20 轮内耗尽；上下文预采集后用 40 轮覆盖大型 PR，仍保持有界。
+            maxTurns: 40
+            systemPrompt: |
+              你是 MindX PR 的只读代码 reviewer。完整遵守项目内
+              .codebuddy/skills/mindx-pr-review/SKILL.md。不得修改仓库、安装依赖、
+              运行 build/test/lint、push、approve、request_changes 或 merge。
+
+              仅允许两类平台写操作：缺少行级 Review 时调用一次
+              `cnb pulls post-pull-review --event comment`，body-file 提交总评；
+              每个能稳定锚定的 blocker 在同一命令中用重复的
+              --comments-body、--comments-path、--comments-start-line、
+              --comments-end-line、--comments-start-side、--comments-end-side、
+              --comments-subject-type 参数提交 CNB diff 行级 review comment。
+              缺少普通总评时再调用一次 `cnb pulls post-pull-comment`，复用同一
+              body-file。已有其一只补另一个，已有两者不写；禁止其他写 API，
+              禁止 approve、request_changes 或 merge。若两者都缺，必须先发布
+              普通总评，再次 get-pull 校验 head 未漂移后，才发布行级 Review。
+            userPrompt: |
+              评审并发布以下 PR 的当前 head：
+              repo=$MINDX_REVIEW_REPO_SLUG
+              pr_iid=$MINDX_REVIEW_PR_IID
+              head_sha=$MINDX_REVIEW_PR_HEAD_SHA
+              target_sha=$MINDX_REVIEW_PR_TARGET_SHA
+              source_branch=$MINDX_REVIEW_SOURCE_BRANCH
+              source_slug=$MINDX_REVIEW_SOURCE_SLUG
+
+              先读取 .codebuddy/skills/mindx-pr-review/SKILL.md，再严格使用以下
+              已预采集文件，不得重新探索 CNB CLI 或重复查询 PR/Issue 元数据：
+              context=/mindx-pr-review/context.json
+              changed_paths=/mindx-pr-review/changed-paths.txt
+              git_diff=/mindx-pr-review/review.diff
+
+              先核对 context.expected_head_sha 是 40 位 SHA 且等于上面的 head_sha；
+              后续 Git revision 必须使用这个实际 SHA，不能假定自定义 env 跨任务注入。
+              Git-first：真实 diff 只读 /mindx-pr-review/review.diff；查看 head 文件用
+              git show "<已核对的40位head>:<path>"，搜索 head 调用方用
+              git grep -n '<symbol>' "<已核对的40位head>" -- <paths>。
+              禁止调用 cnb pulls --help、cnb pulls list-pull-files、get-pr-files；
+              评审阶段也禁止查询 Issue API。只有发布协议允许 get-pull、
+              list-pull-reviews 和 list-pull-comments 做 head/双对象去重校验；
+              两次写之间必须再次 get-pull，禁止向已漂移的 head 发布行评。
+
+              正常路径必须让当前 head 同时存在恰好一个 NPC CodeBuddy
+              `commented` Review（含所有可验证的 diff 行级 blocker 评论）和
+              恰好一个 NPC CodeBuddy 普通总评评论；两者复用同一正文并携带同一
+              head_sha meta。已有其一只补另一个，已有两者才跳过。不得只把评审
+              正文留在 Review body、assistant 回复或流水线日志。最终 assistant
+              只回复发布/补齐/跳过/失败回执，不得伪装发布成功。两者都缺时
+              必须先 post-pull-comment，再校验 head，最后 post-pull-review；
+              已有一半时以已有对象 body 为权威正文，原样补到缺失对象。
+
+        - name: Verify MindX PR review publication
+          script: |
+            set -eu
+
+            verify_current_pull() {
+              VERIFY_PHASE="$1"
+              PULL_JSON="$(cnb pulls get-pull \
+                --repo "$MINDX_REVIEW_REPO_SLUG" \
+                --number "$MINDX_REVIEW_PR_IID" \
+                --verbose)"
+
+              if ! printf '%s\n' "$PULL_JSON" | jq -e \
+                --arg head "$MINDX_REVIEW_PR_HEAD_SHA" '
+                  .data.state == "open" and
+                  (.data.base.ref == "main" or .data.base.ref == "refs/heads/main") and
+                  .data.head.sha == $head
+                ' >/dev/null; then
+                CURRENT_STATE="$(printf '%s\n' "$PULL_JSON" | jq -r '.data.state // "missing"')"
+                CURRENT_BASE="$(printf '%s\n' "$PULL_JSON" | jq -r '.data.base.ref // "missing"')"
+                CURRENT_HEAD="$(printf '%s\n' "$PULL_JSON" | jq -r '.data.head.sha // "missing"')"
+                echo "MindX NPC review verification failed ($VERIFY_PHASE): state=$CURRENT_STATE base=$CURRENT_BASE head=$CURRENT_HEAD expected_head=$MINDX_REVIEW_PR_HEAD_SHA"
+                exit 1
+              fi
+            }
+
+            verify_current_pull "before reading publication records"
+
+            REVIEW_MARKER="<!-- mindx-pr-review-meta: head_sha=$MINDX_REVIEW_PR_HEAD_SHA,"
+            REVIEWS_JSON="$(cnb pulls list-pull-reviews \
+              --repo "$MINDX_REVIEW_REPO_SLUG" \
+              --number "$MINDX_REVIEW_PR_IID" \
+              --page-size 100 \
+              --verbose)"
+
+            MATCHED_REVIEWS="$(printf '%s\n' "$REVIEWS_JSON" | jq -c \
+              --arg marker "$REVIEW_MARKER" \
+              '[
+                .data[]?
+                | select((.body // "") | contains($marker))
+                | select(.state == "commented")
+                | select(.author.is_npc == true)
+                | select(
+                    ((.author.username // "") | ascii_downcase | sub("^@"; ""))
+                    == "codebuddy"
+                  )
+              ]')"
+            MATCH_COUNT="$(printf '%s\n' "$MATCHED_REVIEWS" | jq -r 'length')"
+            if [ "$MATCH_COUNT" -ne 1 ]; then
+              echo "MindX NPC review verification failed: expected exactly one CodeBuddy commented review for head $MINDX_REVIEW_PR_HEAD_SHA, found $MATCH_COUNT"
+              exit 1
+            fi
+            REVIEW_RECORD="$(printf '%s\n' "$MATCHED_REVIEWS" | jq -c '.[0]')"
+
+            REVIEW_ID="$(printf '%s\n' "$REVIEW_RECORD" | jq -r '.id // empty')"
+            BLOCKERS="$(printf '%s\n' "$REVIEW_RECORD" | jq -r \
+              '.body | capture("blockers=(?<count>[0-9]+)").count')"
+            INLINE_DECLARED="$(printf '%s\n' "$REVIEW_RECORD" | jq -r \
+              '.body | capture("inline_comments=(?<count>[0-9]+)").count')"
+            echo "$REVIEW_ID" | grep -Eq '^[1-9][0-9]*$'
+            echo "$BLOCKERS" | grep -Eq '^[0-9]+$'
+            echo "$INLINE_DECLARED" | grep -Eq '^[0-9]+$'
+
+            if [ "$INLINE_DECLARED" -gt "$BLOCKERS" ]; then
+              echo "MindX NPC review metadata invalid: blockers=$BLOCKERS declared_inline_comments=$INLINE_DECLARED"
+              exit 1
+            fi
+
+            REVIEW_COMMENTS_JSON="$(cnb pulls list-pull-review-comments \
+              --repo "$MINDX_REVIEW_REPO_SLUG" \
+              --number "$MINDX_REVIEW_PR_IID" \
+              --review-id "$REVIEW_ID" \
+              --page-size 100 \
+              --verbose)"
+            INLINE_COUNT="$(printf '%s\n' "$REVIEW_COMMENTS_JSON" | jq -r \
+              '.total // (.data | length)')"
+            echo "$INLINE_COUNT" | grep -Eq '^[0-9]+$'
+
+            if [ "$INLINE_COUNT" -ne "$INLINE_DECLARED" ]; then
+              echo "MindX NPC review publication incomplete: blockers=$BLOCKERS declared_inline_comments=$INLINE_DECLARED actual_inline_comments=$INLINE_COUNT"
+              exit 1
+            fi
+
+            COMMENTS_JSON="$(cnb pulls list-pull-comments \
+              --repo "$MINDX_REVIEW_REPO_SLUG" \
+              --number "$MINDX_REVIEW_PR_IID" \
+              --page-size 100 \
+              --verbose)"
+            MATCHED_COMMENTS="$(printf '%s\n' "$COMMENTS_JSON" | jq -c \
+              --arg marker "$REVIEW_MARKER" \
+              '[
+                .data[]?
+                | select((.body // "") | contains($marker))
+                | select(.author.is_npc == true)
+                | select(
+                    ((.author.username // "") | ascii_downcase | sub("^@"; ""))
+                    == "codebuddy"
+                  )
+              ]')"
+            COMMENT_MATCH_COUNT="$(printf '%s\n' "$MATCHED_COMMENTS" | jq -r 'length')"
+            if [ "$COMMENT_MATCH_COUNT" -ne 1 ]; then
+              echo "MindX NPC review verification failed: expected exactly one CodeBuddy ordinary summary comment for head $MINDX_REVIEW_PR_HEAD_SHA, found $COMMENT_MATCH_COUNT"
+              exit 1
+            fi
+            COMMENT_RECORD="$(printf '%s\n' "$MATCHED_COMMENTS" | jq -c '.[0]')"
+
+            REVIEW_BODY_JSON="$(printf '%s\n' "$REVIEW_RECORD" | jq -c '.body')"
+            COMMENT_BODY_JSON="$(printf '%s\n' "$COMMENT_RECORD" | jq -c '.body')"
+            if [ "$REVIEW_BODY_JSON" != "$COMMENT_BODY_JSON" ]; then
+              echo "MindX NPC review verification failed: Review and ordinary comment bodies differ"
+              exit 1
+            fi
+
+            if ! printf '%s\n' "$COMMENT_RECORD" | jq -e \
+              '.body as $body
+              | ($body | contains("## 结论"))
+                and ($body | contains("## ❌ 必改"))' >/dev/null; then
+              echo "MindX NPC review verification failed: ordinary comment does not contain the full summary sections"
+              exit 1
+            fi
+
+            verify_current_pull "after reading publication records"
+
+            COMMENT_ID="$(printf '%s\n' "$COMMENT_RECORD" | jq -r '.id // empty')"
+            echo "$COMMENT_ID" | grep -Eq '^[1-9][0-9]*$'
+            echo "MindX NPC review verified: review_id=$REVIEW_ID comment_id=$COMMENT_ID blockers=$BLOCKERS inline_comments=$INLINE_COUNT"
+
+      failStages:
+        - name: Report MindX NPC PR review failure
+          script: |
+            set -eu
+            python3 .codebuddy/skills/mindx-pr-review/scripts/collect-pr-context.py notify-failure \
+              --body-file /tmp/mindx-pr-review-failure.md
+
+  # 外部 API 触发：自动执行 changelog skill，生成 CHANGELOG.md 后从最新 main
+  # 切 chore/changelog-<ts> 分支提交，建 PR，并用 MINDX_CI_TOKEN 自我 approve。
+  # 后续复用现有 pull_request.mergeable 的 git:auto-merge 完成合入。
+  #
+  # 注意：本 event 必须放在 pull_request.merged 之后（不能夹在
+  # pull_request.update 与 pull_request.merged 之间），否则会被
+  # scripts/workflow/tests/check-prototype-pr-policy.test.mjs 的
+  # "untrusted PR update pipeline has no imported secret" 测试误判。
+  # 该测试用 config.slice(updateStart, mergedStart) 抓取范围，会把
+  # 中间任何 imports:/MINDX_CI_TOKEN 视作 untrusted 阶段泄露。
+  #
+  # 外部触发示例：
+  #   curl -X POST "https://api.cnb.woa.com/x-team/mindx/-/build/start" \
+  #     -H "Authorization: Bearer $CNB_TOKEN" \
+  #     -H "Content-Type: application/json" \
+  #     -d '{
+  #       "event": "api_trigger_changelog",
+  #       "npc": { "name": "CodeBuddy", "workMode": true },
+  #       "env": { "DRY_RUN": "false" }
+  #     }'
+  #
+  # DRY_RUN=true：完整跑 skill 但无任何副作用（不写文件、不 commit、不建 PR）。
+  #
+  # ─── TEST-MODE-START ─── (端到端测试用，测完删除本 block)
+  # TEST_MODE=true：真跑一次完整链路，但写入 CHANGELOG-DEBUG.md 而非 CHANGELOG.md，
+  # PR 分支名 chore/changelog-debug-<ts>，PR 标题带 [TEST] 前缀，
+  # 跳过 skill Phase 8（不动 issue 状态），保证测试不污染正式 CHANGELOG 和 issue。
+  # 触发示例：
+  #   curl -X POST "https://api.cnb.woa.com/x-team/mindx/-/build/start" \
+  #     -H "Authorization: Bearer $CNB_TOKEN" \
+  #     -H "Content-Type: application/json" \
+  #     -d '{
+  #       "event": "api_trigger_changelog",
+  #       "npc": { "name": "CodeBuddy", "workMode": true },
+  #       "env": { "TEST_MODE": "true" }
+  #     }'
+  # ─── TEST-MODE-END ───
+  api_trigger_changelog:
+    - name: MindX auto changelog
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      sandbox: false
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      env:
+        DRY_RUN: "false"
+        # TEST-MODE-START (测完删除本行)
+        TEST_MODE: "false"
+        # TEST-MODE-END
+      stages:
+        - name: env check
+          script: |
+            set -e
+            echo "DRY_RUN=$DRY_RUN"
+            echo "Build=$CNB_BUILD_WEB_URL"
+            test -f package.json
+            test -f CHANGELOG.md
+            test -d .codebuddy/skills/changelog
+            command -v pnpm >/dev/null || { echo "❌ pnpm missing"; exit 1; }
+            [ -n "$GONGFENG_SSH_PRIVATE_KEY" ] || { echo "❌ GONGFENG_SSH_PRIVATE_KEY missing"; exit 1; }
+            [ -n "$MINDX_CI_TOKEN" ] || { echo "❌ MINDX_CI_TOKEN missing"; exit 1; }
+            if ! command -v cnb >/dev/null 2>&1; then
+              npm install -g @cnbcool/cnb-cli
+            fi
+            cnb --version
+
+        - name: run changelog skill (NPC)
+          type: npc:go
+          options:
+            role: changelog-bot
+            systemPrompt: |
+              严格按 changelog-bot 角色定义执行。
+              当前 DRY_RUN=$DRY_RUN，TEST_MODE=$TEST_MODE。
+            userPrompt: |
+              请读取 .codebuddy/skills/changelog/SKILL.md 并执行发布后处理管线。
+              DRY_RUN=$DRY_RUN
+              TEST_MODE=$TEST_MODE
+
+        # 从 NPC 建 PR 后写入的文件里读出 PR_IID，用 ##[set-output] 桥接到后续 stage。
+        # 直接在 npc:go 上用 exports 拿不到——npc:go 的思考/回复内容不走 stage stdout，
+        # ##[set-output] 只在普通 script 任务的 stdout 里被 CNB 解析。
+        - name: capture PR IID from NPC output
+          if: |
+            [ "$DRY_RUN" != "true" ]
+          script: |
+            set -e
+            if [ ! -f /tmp/pr_iid.txt ]; then
+              echo "ℹ️ /tmp/pr_iid.txt 不存在（NPC 未建 PR，可能是 Stage A/A.5 未走到 Stage B）"
+              exit 0
+            fi
+            PR_IID=$(cat /tmp/pr_iid.txt | tr -d '[:space:]')
+            if ! echo "$PR_IID" | grep -qE '^[1-9][0-9]*$'; then
+              echo "❌ /tmp/pr_iid.txt 内容不是合法 PR 编号: '$PR_IID'"
+              exit 1
+            fi
+            echo "captured PR_IID=$PR_IID"
+            echo "##[set-output PR_IID=$PR_IID]"
+          exports:
+            PR_IID: PR_IID
+
+        - name: dry-run guard
+          if: |
+            [ "$DRY_RUN" = "true" ]
+          script: |
+            set -e
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "❌ DRY_RUN 下不应有未提交改动"
+              git status
+              exit 1
+            fi
+            if git ls-remote --heads origin "chore/changelog-*" | grep -q .; then
+              echo "❌ DRY_RUN 下不应产生 chore/changelog-* 远端分支"
+              exit 1
+            fi
+            echo "✅ DRY-RUN passed, no side effect"
+
+        - name: self approve via MINDX_CI_TOKEN
+          if: |
+            [ "$DRY_RUN" != "true" ]
+          script: |
+            set -e
+            if [ -z "$PR_IID" ]; then
+              echo "❌ 未拿到 PR_IID"
+              echo "   来源：前一个 stage 'capture PR IID from NPC output' 未从"
+              echo "   /tmp/pr_iid.txt 读到 PR 编号。可能原因："
+              echo "   1) NPC 因某个 Phase 报错而没走到 Stage B（建 PR）"
+              echo "   2) NPC 建了 PR 但没有把 iid 写入 /tmp/pr_iid.txt"
+              echo "   请查看上方 'run changelog skill (NPC)' 与 'capture PR IID' 日志。"
+              exit 1
+            fi
+            # 等 CNB 索引到新 PR，避免 approve 早于 PR 记录落库
+            sleep 5
+            # 用 tiggersxliu 身份的 CI token 打 approve，绕过 self-approve 限制。
+            # ⚠️ cnb CLI 遇到 API 错误（如 401 token 过期）时会把错误打到 stdout
+            # 但退出码仍为 0，set -e 拦不住，必须显式抓 status/errcode 行判定。
+            APPROVE_OUT=$(CNB_TOKEN="$MINDX_CI_TOKEN" cnb pulls post-pull-review \
+              --repo x-team/mindx \
+              --number "$PR_IID" \
+              --event approve \
+              --body "自动化 changelog PR，仅含 CHANGELOG.md 变更，已由 MINDX_CI_TOKEN 自动 approve。" 2>&1)
+            echo "$APPROVE_OUT"
+            # 只接受 2xx；任何非 2xx status 视为失败
+            STATUS=$(echo "$APPROVE_OUT" | grep -E '^status:' | head -1 | awk '{print $2}')
+            if [ -n "$STATUS" ] && ! echo "$STATUS" | grep -qE '^2[0-9]{2}$'; then
+              echo ""
+              echo "❌ approve 请求返回非成功状态：status=$STATUS"
+              echo "   常见原因："
+              echo "   1) MINDX_CI_TOKEN 已过期 → 去 CNB 个人设置 → 访问令牌 重签"
+              echo "   2) MINDX_CI_TOKEN 权限不足 → 至少需要 repo-notes:rw"
+              echo "   3) MINDX_CI_TOKEN 对应账号已从 x-team/mindx 移除权限"
+              exit 1
+            fi
+            # 部分成功场景 CLI 不打 status: 行，兜底扫 errcode
+            if echo "$APPROVE_OUT" | grep -qE '^ *errcode:'; then
+              echo ""
+              echo "❌ approve 请求返回错误 (errcode 非零)"
+              exit 1
+            fi
+            echo "✅ Approved PR #$PR_IID via MINDX_CI_TOKEN"
+
+  push:
+    - name: XVibe Dashboard changelog webhook
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: Detect CHANGELOG.md and notify XVibe
+          script: |
+            set -eu
+            git fetch origin "${CNB_BRANCH:-main}" --depth=200 >/dev/null 2>&1 || true
+
+            ZERO="0000000000000000000000000000000000000000"
+            BASE="${CNB_BEFORE_SHA:-}"
+            HEAD_SHA="${CNB_COMMIT:-HEAD}"
+            if [ -z "$BASE" ] || [ "$BASE" = "$ZERO" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+              CHANGED="$(git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA" -- CHANGELOG.md)"
+            else
+              CHANGED="$(git diff --name-only "$BASE" "$HEAD_SHA" -- CHANGELOG.md)"
+            fi
+
+            if [ "$CHANGED" != "CHANGELOG.md" ]; then
+              echo "CHANGELOG.md unchanged; skip XVibe notification"
+              exit 0
+            fi
+
+            curl --fail --silent --show-error -X POST http://21.214.44.169:8080/webhook/git \
+              -H "Content-Type: application/json" \
+              -d "{\"type\":\"PushEvent\",\"actor\":{\"username\":\"$CNB_BUILD_USER\"},\"repo\":{\"path\":\"$CNB_REPO_SLUG\"},\"payload\":{\"ref\":\"refs/heads/$CNB_BRANCH\",\"head\":\"$CNB_COMMIT\",\"before\":\"$CNB_BEFORE_SHA\",\"commits\":[]}}"
+            echo "XVibe Dashboard changelog notification sent"
+
+    - &sync_branch_to_gongfeng
+      name: Sync CNB branch to gongfeng (same-named)
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: 校验 SSH key 与分支名
+          script: |
+            set -e
+            if [ -z "$GONGFENG_SSH_PRIVATE_KEY" ]; then
+              echo "❌ GONGFENG_SSH_PRIVATE_KEY 未注入，检查 x-team/x-team-secrets/mindx_envs.yml"
+              exit 1
+            fi
+            if [ -z "$CNB_BRANCH" ]; then
+              echo "❌ 未取到 CNB_BRANCH，异常事件，跳过同步"
+              exit 1
+            fi
+            echo "✅ SSH key 就绪（len=${#GONGFENG_SSH_PRIVATE_KEY}），准备同步分支：$CNB_BRANCH"
+
+        - name: 配置工蜂 SSH 认证
+          script: |
+            set -e
+            mkdir -p "$HOME/.ssh"
+            chmod 700 "$HOME/.ssh"
+            printf "%s\n" "$GONGFENG_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_gongfeng"
+            chmod 600 "$HOME/.ssh/id_gongfeng"
+            ssh-keyscan -H git.woa.com >> "$HOME/.ssh/known_hosts"
+            git config core.sshCommand "ssh -i $HOME/.ssh/id_gongfeng -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            echo "✅ 工蜂 SSH 认证已配置"
+
+        - name: 拉取完整历史
+          script: |
+            set -e
+            # CNB 默认可能是浅克隆；拉取完整历史便于日志与排查。
+            git fetch --unshallow origin "$CNB_BRANCH:refs/remotes/origin/$CNB_BRANCH" 2>/dev/null \
+              || git fetch --depth=10000 origin "$CNB_BRANCH:refs/remotes/origin/$CNB_BRANCH"
+            echo "✅ 已拉取 $(git rev-list --count "origin/$CNB_BRANCH") 个 commit"
+
+        - name: 推送到工蜂同名分支
+          script: |
+            set -eu
+            git remote remove gongfeng 2>/dev/null || true
+            git remote add gongfeng "git@git.woa.com:tencent-doc-wuhan/mindx.git"
+
+            SRC="refs/remotes/origin/$CNB_BRANCH"
+            DST="refs/heads/$CNB_BRANCH"
+            GONGFENG_LS_REMOTE="$(git ls-remote --heads gongfeng "$CNB_BRANCH")"
+            GONGFENG_SHA="$(printf "%s" "$GONGFENG_LS_REMOTE" | awk '{print $1}')"
+
+            case "$CNB_BRANCH" in
+              main|hotfix/*|feature/*|bugfix/*)
+                # CNB 是唯一代码真相源；工蜂侧任何额外 commit 都是违规状态。
+                # 当前工蜂保护规则禁止 force push；如出现非快进关系，停止同步并告警。
+                if [ -n "$GONGFENG_SHA" ]; then
+                  git fetch --depth=10000 gongfeng "$CNB_BRANCH:refs/remotes/gongfeng/$CNB_BRANCH"
+                  if ! git merge-base --is-ancestor "refs/remotes/gongfeng/$CNB_BRANCH" "$SRC"; then
+                    echo "❌ 工蜂 $CNB_BRANCH 含 CNB 未包含的 commit，普通推送无法快进"
+                    echo "   工蜂: $GONGFENG_SHA"
+                    echo "   CNB:   $(git rev-parse "$SRC")"
+                    if [ -n "${CR_ROBOT_KEY:-}" ]; then
+                      NON_FF_MSG="⛔ **mindx CNB → 工蜂同步遇到非快进分支，已停止普通推送**\\n\\n- 分支: ${CNB_BRANCH}\\n- 工蜂: ${GONGFENG_SHA}\\n- CNB: $(git rev-parse "$SRC")\\n- 构建: ${CNB_BUILD_WEB_URL}"
+                      curl --fail --show-error --silent -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${CR_ROBOT_KEY}" \
+                        -H 'Content-Type: application/json' \
+                        -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$NON_FF_MSG\"}}"
+                    fi
+                    exit 1
+                  fi
+                fi
+                git push gongfeng "$SRC:$DST"
+                echo "✅ 已普通推送 CNB $CNB_BRANCH → 工蜂 $CNB_BRANCH"
+                ;;
+              *)
+                echo "⏭️ 分支 $CNB_BRANCH 不在同步范围，跳过"
+                ;;
+            esac
+
+        - name: 同步 tags（仅 main push 时）
+          if: '[ "$CNB_BRANCH" = "main" ]'
+          script: |
+            # tags 只在 main 同步时推一次，冲突时保留工蜂侧（发布 tag 一般在工蜂打）。
+            git push gongfeng --tags || echo "⚠️ 部分 tag 推送失败（工蜂已有同名 tag），不阻断"
+
+        - name: 清理
+          script: |
+            # runner 每次都是干净环境，显式移除 remote 是防御性习惯。
+            git remote remove gongfeng || true
+            echo "✅ 分支 $CNB_BRANCH 同步完成"
+      failStages:
+        - name: 通知同步失败
+          script: |
+            set -e
+            if [ -z "${CR_ROBOT_KEY:-}" ]; then
+              echo "⚠️ CR_ROBOT_KEY 未注入，跳过企微告警"
+              exit 0
+            fi
+            curl --fail --show-error --silent -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${CR_ROBOT_KEY}" \
+              -H 'Content-Type: application/json' \
+              -d @- <<EOF
+            {
+              "msgtype": "markdown",
+              "markdown": {
+                "content": "⛔ **mindx CNB → 工蜂同步失败**\n\n- 分支: ${CNB_BRANCH}\n- 失败 stage: ${CNB_BUILD_FAILED_STAGE_NAME}\n- 错误: ${CNB_BUILD_FAILED_MSG}\n- 构建: ${CNB_BUILD_WEB_URL}\n\n若为 main / hotfix，工蜂对应分支已陈旧，请立即人工排查。"
+              }
+            }
+            EOF
+
+  # CNB crontab 使用 Asia/Shanghai；这里是北京时间每天 09:00。
+  "crontab: 0 9 * * *":
+    - name: MindX CNB/Gongfeng main sync health check
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: 比对工蜂 main 与 CNB main
+          script: |
+            set -e
+            if [ -z "$GONGFENG_SSH_PRIVATE_KEY" ]; then
+              echo "❌ GONGFENG_SSH_PRIVATE_KEY 未注入，无法读取工蜂 main"
+              exit 1
+            fi
+            if [ -z "${CR_ROBOT_KEY:-}" ]; then
+              echo "⚠️ CR_ROBOT_KEY 未注入，发现不一致时只能打日志，无法企微告警"
+            fi
+
+            mkdir -p "$HOME/.ssh"
+            chmod 700 "$HOME/.ssh"
+            printf "%s\n" "$GONGFENG_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_gongfeng"
+            chmod 600 "$HOME/.ssh/id_gongfeng"
+            ssh-keyscan -H git.woa.com >> "$HOME/.ssh/known_hosts"
+            git config core.sshCommand "ssh -i $HOME/.ssh/id_gongfeng -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+            git remote remove gongfeng 2>/dev/null || true
+            git remote add gongfeng "git@git.woa.com:tencent-doc-wuhan/mindx.git"
+            SOURCE_MAIN_REF="$(git ls-remote origin refs/heads/main)"
+            GONGFENG_MAIN_REF="$(git ls-remote gongfeng refs/heads/main)"
+            SOURCE_MAIN_SHA="$(printf "%s" "$SOURCE_MAIN_REF" | awk '{print $1}')"
+            GONGFENG_MAIN_SHA="$(printf "%s" "$GONGFENG_MAIN_REF" | awk '{print $1}')"
+            echo "CNB main:  $SOURCE_MAIN_SHA"
+            echo "工蜂 main: $GONGFENG_MAIN_SHA"
+
+            if [ -z "$SOURCE_MAIN_SHA" ] || [ -z "$GONGFENG_MAIN_SHA" ]; then
+              echo "❌ 未能读取 CNB 或工蜂 main SHA"
+              exit 1
+            fi
+
+            if [ "$SOURCE_MAIN_SHA" != "$GONGFENG_MAIN_SHA" ]; then
+              MSG="⚠️ mindx 工蜂 main 与 CNB main 不一致\nCNB: $SOURCE_MAIN_SHA\n工蜂: $GONGFENG_MAIN_SHA\n请检查同步 pipeline"
+              echo "$MSG"
+              if [ -n "${CR_ROBOT_KEY:-}" ]; then
+                curl --fail --show-error --silent -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=$CR_ROBOT_KEY" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"$MSG\"}}"
+              fi
+              exit 1
+            else
+              echo "✅ 两侧 main 一致"
+            fi
+
+# hotfix/feature/bugfix 分支通过 HTTPS + GONGFENG_ROBOT_TOKEN 同步到工蜂；
+# main 分支继续使用 SSH + GONGFENG_SSH_PRIVATE_KEY（见上方 &sync_branch_to_gongfeng）。
+# prototype 守卫由 $.pull_request.target 兜底命中。
+"hotfix/**":
+  push:
+    - &sync_branch_to_gongfeng_token
+      name: Sync CNB branch to gongfeng via HTTPS token
+      imports:
+        - https://cnb.woa.com/x-team/x-team-secrets/-/blob/main/mindx_envs.yml
+      docker:
+        image: mirrors.tencent.com/docs-oci/docs-oci-dev-node20-pnpm9
+      stages:
+        - name: 校验 Token 与分支名
+          script: |
+            set -e
+            if [ -z "$GONGFENG_ROBOT_TOKEN" ]; then
+              echo "❌ GONGFENG_ROBOT_TOKEN 未注入，检查 x-team/x-team-secrets/mindx_envs.yml"
+              exit 1
+            fi
+            if [ -z "$CNB_BRANCH" ]; then
+              echo "❌ 未取到 CNB_BRANCH，异常事件，跳过同步"
+              exit 1
+            fi
+            echo "✅ GONGFENG_ROBOT_TOKEN 已注入，准备同步分支：$CNB_BRANCH"
+
+        - name: 验证 Token 归属
+          script: |
+            set -e
+            # 调用工蜂 API 验证 token 归属必须为 harness_assistant，仅打印用户名不打印 token。
+            API_RESP="$(curl --fail --silent --show-error \
+              -H "PRIVATE-TOKEN: $GONGFENG_ROBOT_TOKEN" \
+              "https://git.woa.com/api/v3/user")"
+            TOKEN_USER="$(printf '%s' "$API_RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const u=JSON.parse(d).username;process.stdout.write(u||"")}catch{process.exit(1)}})')"
+            if [ "$TOKEN_USER" != "harness_assistant" ]; then
+              echo "❌ GONGFENG_ROBOT_TOKEN 归属为 '$TOKEN_USER'，期望 'harness_assistant'，拒绝推送"
+              exit 1
+            fi
+            echo "✅ Token 归属验证通过：$TOKEN_USER"
+
+        - name: 拉取完整历史
+          script: |
+            set -e
+            # CNB 默认可能是浅克隆；拉取完整历史便于日志与排查。
+            git fetch --unshallow origin "$CNB_BRANCH:refs/remotes/origin/$CNB_BRANCH" 2>/dev/null \
+              || git fetch --depth=10000 origin "$CNB_BRANCH:refs/remotes/origin/$CNB_BRANCH"
+            echo "✅ 已拉取 $(git rev-list --count "origin/$CNB_BRANCH") 个 commit"
+
+        - name: 推送到工蜂同名分支（HTTPS + GIT_ASKPASS）
+          script: |
+            set -eu
+            # ── 临时 GIT_ASKPASS 脚本 ──
+            # 根据 git 的 prompt 区分 Username / Password：
+            #   Username → private（Git Smart HTTPS Basic 用户名）
+            #   Password → $GONGFENG_ROBOT_TOKEN（不展开、不落盘 token 明文）
+            #   未知 prompt → 失败（防止意外泄露）
+            ASKPASS_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/git-askpass.XXXXXX")"
+            trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+            cat > "$ASKPASS_SCRIPT" << 'ASKPASS_EOF'
+            #!/bin/sh
+            case "$1" in
+              *Username*) printf '%s\n' "private" ;;
+              *Password*) printf '%s\n' "$GONGFENG_ROBOT_TOKEN" ;;
+              *) echo "Unknown GIT_ASKPASS prompt: $1" >&2; exit 1 ;;
+            esac
+            ASKPASS_EOF
+            chmod 700 "$ASKPASS_SCRIPT"
+
+            # 全局导出，后续所有 git 网络操作统一走 ASKPASS 认证；
+            # GIT_TERMINAL_PROMPT=0 确保认证失败立即报错进入 failStages。
+            export GIT_ASKPASS="$ASKPASS_SCRIPT"
+            export GIT_TERMINAL_PROMPT=0
+
+            git remote remove gongfeng 2>/dev/null || true
+            # HTTPS remote URL 不含用户名；认证由 GIT_ASKPASS 按需提供。
+            git remote add gongfeng "https://git.woa.com/tencent-doc-wuhan/mindx.git"
+
+            SRC="refs/remotes/origin/$CNB_BRANCH"
+            DST="refs/heads/$CNB_BRANCH"
+            GONGFENG_LS_REMOTE="$(git ls-remote --heads gongfeng "$CNB_BRANCH")"
+            GONGFENG_SHA="$(printf "%s" "$GONGFENG_LS_REMOTE" | awk '{print $1}')"
+
+            # 非 main 分支：保留非快进保护与失败告警行为。
+            if [ -n "$GONGFENG_SHA" ]; then
+              git fetch --depth=10000 gongfeng "$CNB_BRANCH:refs/remotes/gongfeng/$CNB_BRANCH"
+              if ! git merge-base --is-ancestor "refs/remotes/gongfeng/$CNB_BRANCH" "$SRC"; then
+                echo "❌ 工蜂 $CNB_BRANCH 含 CNB 未包含的 commit，普通推送无法快进"
+                echo "   工蜂: $GONGFENG_SHA"
+                echo "   CNB:   $(git rev-parse "$SRC")"
+                if [ -n "${CR_ROBOT_KEY:-}" ]; then
+                  NON_FF_MSG="⛔ **mindx CNB → 工蜂同步遇到非快进分支，已停止普通推送**\\n\\n- 分支: ${CNB_BRANCH}\\n- 工蜂: ${GONGFENG_SHA}\\n- CNB: $(git rev-parse "$SRC")\\n- 构建: ${CNB_BUILD_WEB_URL}"
+                  curl --fail --show-error --silent -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${CR_ROBOT_KEY}" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"$NON_FF_MSG\"}}"
+                fi
+                exit 1
+              fi
+            fi
+            git push gongfeng "$SRC:$DST"
+            echo "✅ 已普通推送 CNB $CNB_BRANCH → 工蜂 $CNB_BRANCH（HTTPS token）"
+
+        - name: 清理
+          script: |
+            # runner 每次都是干净环境，显式移除 remote 是防御性习惯。
+            git remote remove gongfeng || true
+            echo "✅ 分支 $CNB_BRANCH 同步完成"
+      failStages:
+        - name: 通知同步失败
+          script: |
+            set -e
+            if [ -z "${CR_ROBOT_KEY:-}" ]; then
+              echo "⚠️ CR_ROBOT_KEY 未注入，跳过企微告警"
+              exit 0
+            fi
+            curl --fail --show-error --silent -X POST "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${CR_ROBOT_KEY}" \
+              -H 'Content-Type: application/json' \
+              -d @- <<EOF
+            {
+              "msgtype": "markdown",
+              "markdown": {
+                "content": "⛔ **mindx CNB → 工蜂同步失败**\n\n- 分支: ${CNB_BRANCH}\n- 失败 stage: ${CNB_BUILD_FAILED_STAGE_NAME}\n- 错误: ${CNB_BUILD_FAILED_MSG}\n- 构建: ${CNB_BUILD_WEB_URL}\n\n工蜂对应分支已陈旧，请立即人工排查。"
+              }
+            }
+            EOF
+
+"feature/**":
+  push:
+    - <<: *sync_branch_to_gongfeng_token
+
+"bugfix/**":
+  push:
+    - <<: *sync_branch_to_gongfeng_token

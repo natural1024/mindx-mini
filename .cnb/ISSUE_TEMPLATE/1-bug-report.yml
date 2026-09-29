@@ -1,0 +1,83 @@
+name: 缺陷反馈（Bug）
+description: 报告一个 MindX Web 产品缺陷
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 问题现象
+      description: 清楚描述用户或 Agent 看到的异常现象。
+    validations:
+      required: true
+
+  - type: textarea
+    id: location_and_environment
+    attributes:
+      label: 发生位置与环境
+      description: 填写发生页面或操作入口，以及 MindX Web 环境：浏览器、WorkBuddy 内嵌或移动 Web。浏览器、系统或 MindX 版本仅在与问题相关时填写。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproduction_frequency
+    attributes:
+      label: 复现频率
+      options:
+        - 必现
+        - 高频
+        - 偶现
+        - 仅出现一次
+        - 暂不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序列出可重复执行的最短复现路径。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_result
+    attributes:
+      label: 实际结果
+      description: 描述执行复现步骤后实际发生的结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_result
+    attributes:
+      label: 预期结果
+      description: 描述正确行为或应呈现的结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact_scope
+    attributes:
+      label: 影响范围
+      description: 可选。说明受影响的用户、Agent、Workspace、文档或核心链路。
+    validations:
+      required: false
+
+  - type: textarea
+    id: fix_acceptance_criteria
+    attributes:
+      label: 验收标准
+      description: "只是报告问题时可暂不填写；确认进入修复前必须补齐。每条独占一行，精确格式为 `- [ ] AC-1: 可观察结果`。"
+      placeholder: |
+        - [ ] AC-1: ...
+        - [ ] AC-2: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 可选。补充截图、录屏、日志、报错信息或相关链接，并注意移除敏感信息。
+    validations:
+      required: false

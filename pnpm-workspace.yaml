@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+  - apps/*
+  - tools/*
+catalog:
+  "@tencent/mindx-engineering-skills": 0.2.0

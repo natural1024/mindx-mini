@@ -1,0 +1,9 @@
+.git
+.nx
+.DS_Store
+**/node_modules
+**/dist
+**/dist-*
+**/coverage
+**/.cache
+apps/mindx/public

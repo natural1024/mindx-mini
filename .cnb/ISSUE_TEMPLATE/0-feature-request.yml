@@ -1,0 +1,46 @@
+name: 产品需求（Feature）
+description: 提交一个 MindX 产品功能需求
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: problem_and_goal
+    attributes:
+      label: 问题与目标
+      description: 说明当前问题、目标用户以及希望达成的结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage_scenario
+    attributes:
+      label: 使用场景
+      description: 描述谁在什么情况下使用此能力，并明确面向 Human、Agent 或两者。
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围
+      description: 可选。分别列出本次包含与不包含的内容，帮助控制需求边界。
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: 验收标准
+      description: "只是记录需求时可暂不填写；进入原型或研发前必须补齐。每条独占一行，精确格式为 `- [ ] AC-1: 可观察结果`。"
+      placeholder: |
+        - [ ] AC-1: ...
+        - [ ] AC-2: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: supporting_materials
+    attributes:
+      label: 补充材料
+      description: 可选。补充相关文档、截图、数据或参考链接。
+    validations:
+      required: false

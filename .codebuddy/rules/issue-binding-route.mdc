@@ -1,0 +1,281 @@
+---
+description: 任何形式的 git commit 命令在真正执行前必须先过 IssueBinding 闸门——必须存在 [IssueBinding] 声明，且 commit message 末尾符合 `#<issueid>` 或 `[no-issue]` 规范。本规则独立于 dev-workflow / user-role / conflict-resolver / component-migration，专管"commit 与 issue 的绑定"这一件事。
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-01T23:50:00.000Z
+provider:
+---
+
+# ⛔ IssueBinding 强制路由（commit 前必检 · 独立闸门）
+
+本规则是**独立的 commit 出口闸门**，只管"任何形式的 `git commit` 命令必须正确绑定 issue 或显式声明 `[no-issue]`"这一件事。不管 dev-workflow 的代码分档、不管 user-role 的 SOP 基建、不管 conflict-resolver 的 git 历史改写、不管 component-migration 的组件落点判定（那是各自规则的职责）。
+
+**五个闸门彼此独立**：dev-workflow / user-role / conflict-resolver / component-migration / issue-binding 任一失手不影响其它生效。
+
+## ⚡ 快速路径 / 短路提示
+
+**本闸门只在准备执行 `git commit` 时才生效**。判定顺序：
+
+1. 不涉及 commit 的动作（`git status` / `git diff` / `git add`（不带 commit）/ 只读浏览）→ 本规则**不产生约束**。
+2. 同一任务里一次 `[IssueBinding]` 声明覆盖后续所有 commit：只要角色、commit type 类别、issue 引用**没有变化**，可以连续 commit 而不必重复声明。
+3. commit 命中下面任意条件才必须**重新声明**：
+   - 角色变了（如换了 `git config user.name`）
+   - commit type 跨类别（`feat/fix/revert` ↔ `chore/docs/refactor/style/test/build/ci/perf`）
+   - 引用形式变了（`#<id>` ↔ `[no-issue]`，或换到不同 `#<id>`）
+   - 从 `feature|bugfix/<id>-<slug>` 切换到 `prototype/<id>-<slug>` 或工程分支
+4. 开发者角色 + 分支命中 `chore|docs|refactor|style|test|build|ci|perf/<slug>` + 累计 diff 已通过 `scripts/workflow/infrastructure-route.mjs` 白名单 → 直接走"真工程化 → 可 `[no-issue]`"分支，不需要每次 commit 都跑一次 `git diff --staged` 语义自检。
+
+## ⚠️ 为什么需要独立闸门
+
+历史风险：AI 跳过 `cmd-publish` skill 直接 `execute_command("git commit -m '...'")`，会导致：
+
+- commit message 末尾忘了带 `#<issueid>` 或 `[no-issue]`
+- 角色判定漏掉：产品/设计师误用 `[no-issue]`、开发者 `feat`/`fix` 类未带 issueid
+- 兜底只有本地 `.husky/commit-msg` 的 commitlint + check-commit-issue-ref.mjs——但等到 husky 拦住时 AI 可能已经准备 push 一堆改动，回滚成本高
+
+本规则把判定挂在 **alwaysApply rule** 上，**不依赖任何 skill 被加载**，让"裸 git commit 一把梭"在本仓库内**结构性不可行**。
+
+## 🔴 硬约束（不可绕过）
+
+### 约束 1：心理锚点（每次 commit 前必问自己）
+
+**在调用 `execute_command` 执行任何形式的 `git commit` 之前**，必须在脑中完成自问：
+
+> **"我是否已在本次会话中输出过 `[IssueBinding] 角色=<role>，commit_type=<type>，issue=#<id>|[no-issue]，依据=<...>` 的声明？"**
+
+受约束的命令清单（命中即必须声明）：
+
+- `git commit -m "..."`
+- `git commit -am "..."`
+- `git commit -F <file>`
+- `git commit --amend ...`（除非只是改作者信息）
+- 任何形式的 commit 提交（包括通过 GUI 工具触发的命令）
+
+- ✅ 已声明 → 可以继续 commit
+- ❌ 否 → 立即停止，先补输出 `[IssueBinding]` 声明
+
+### 约束 2：反向触发（可证伪的行为闸门）
+
+**调用任何 `git commit` 之前**，本次会话历史中**必须已存在**一条以 `[IssueBinding]` 开头的助手输出。
+
+- 本约束是**可证伪的**：只需 grep 会话有无 `[IssueBinding]` 开头的段落
+- 若不存在 → **立即停止**，按角色 × commit_type 决策树补输出声明
+- 声明格式（强制）：
+
+```
+[IssueBinding] 角色=<designer|developer>，commit_type=<feat|fix|revert|chore|docs|refactor|style|test|build|ci|perf>，issue=#<id>|[no-issue]，依据=<引用 docs/release-workflow.md §1 + 决策路径>
+```
+
+### 约束 3：角色 × commit_type 矩阵（不可破坏）
+
+| 角色        | commit_type                                                                | 允许的引用形式                               |
+| :---------- | :------------------------------------------------------------------------- | :------------------------------------------- |
+| 产品/设计师 | **任意**                                                                   | **必须** `#<issueid>` —— 不允许 `[no-issue]` |
+| 开发者      | `feat` / `fix`                                                             | **必须** `#<issueid>` —— 不允许 `[no-issue]` |
+| 开发者      | `revert`                                                                   | **必须** `#<issueid>` —— 不允许 `[no-issue]` |
+| 开发者      | `chore` / `docs` / `refactor` / `style` / `test` / `build` / `ci` / `perf` | 二选一：`#<issueid>` 或 `[no-issue]`         |
+
+#### prototype 分支的更强约束
+
+当前分支匹配 `prototype/<branch_issue_id>-<slug>` 时：
+
+- 不论角色与 commit type，subject 都必须以 `#<branch_issue_id>` 结尾。
+- 禁止 `[no-issue]`，禁止绑定不同 Issue。
+- commit 可以 push 到 prototype 分支，但之后禁止创建 PR；分享只走 `prototype-deploy` 且不 commit/push，`cmd-publish` prototype route 只允许冻结交付。
+- Issue 当前状态应为 `原型中`；handoff 冻结成功后才允许推进到 `待研发`。
+
+#### 角色判定的权威源
+
+`.vibe/developer-allowlist.json` 的 `developers[].username` 字段比对 `git config user.name`：
+
+- 命中 → 开发者
+- 未命中 → 产品/设计师
+
+#### `#<issueid>` 必须真实存在
+
+`#<issueid>` 中的 `<issueid>` 必须是 CNB 上**真实存在的 issue**。
+
+- 禁止编造（如 `#99999`）
+- 禁止用废弃占位 `#0` / `#000`
+- 如果你不确定 issueid 是否存在 → 通过 `cnb issues get-issue --repo x-team/mindx --number <id>` 校验后再 commit
+- CI 端有 `scripts/workflow/check-commit-issue-ref.mjs` 兜底校验真实性，但 AI 应主动校验避免来回返工
+
+### 约束 4：禁止用 --no-verify 跳过 commit-msg hook
+
+`.husky/commit-msg` + `scripts/workflow/check-commit-issue-ref.mjs` 是本闸门的**最后一道墙**。若你 commit 时加了 `--no-verify`，会同时跳过本闸门的兜底，**视同绕过约束 1-3**。
+
+- ⛔ 禁止在普通 commit 中使用 `--no-verify`
+- 唯一豁免：用户**明确文字授权**「跳过 hook」/「加 --no-verify」（且 AI 已在会话中确认理解过用户的特殊场景）
+
+### 约束 5：AI commit 前强制语义自检（防 chore 伪装规避）
+
+> 背景漏洞：现有 commit-msg / commitlint / CI 只看 commit **type 字符串**，不看 diff 内容。把明明是 Feature、Bug 或 Experience 的改动写成 `chore: xxx [no-issue]` 就能合法绕过 issue 强制。本约束封死 **AI 执行 commit** 这条路径。
+
+**AI 在调用 `git commit` 之前，必须基于以下两个信源做语义判定**：
+
+1. **会话上下文意图**——用户这次到底想做什么（新增能力、修复错误、优化体验，还是改流水线/文档）
+2. **`git diff --staged` 实际改动**——改了哪些文件、是不是业务代码
+
+**确定性产品类型边界**与[共享 Issue 创建契约](../skills/_shared/issue-creation.md)一致：
+
+- 违反既有明确正确行为、发生回归或产生错误结果 → **Bug** → `type:bug` + `fix:`
+- 能力可用且结果正确，但存在认知、操作、效率或感受阻力 → **Experience** → `type:experience` + `feat:`
+- 新增当前不支持的能力或业务结果 → **Feature** → `type:feature` + `feat:`
+
+按事实自动分类；只有证据仍跨边界冲突时才问一个最小问题。
+
+**判定启发式（写进决策，给 AI 明确标准）**：
+
+| 信号                                                                                                                                                                                                                                                                                                                                                                                                 | 判定                           |
+| :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------- |
+| 累计 diff 未全部通过 `scripts/workflow/infrastructure-route.mjs`，混入业务/运行时代码、未知或非法路径；或会话意图命中 Feature/Bug/Experience                                                                                                                                                                                                                                                              | **三类产品语义 → 必须 Issue**  |
+| 累计 diff 仅含分类器显式根配置；`.agents/**`、`.cnb/**`、`.codebuddy/**`、`.github/**`、`.husky/**`、`.vibe/**`、`docs/**`、`scripts/**`、`tools/**`；任意位置 `.md`；`packages/*/.business-frozen.json`；或 basename 严格匹配 `*.test.{ts,tsx,js,jsx,mts,mjs,cts,cjs}` / `*.spec.{ts,tsx,js,jsx,mts,mjs,cts,cjs}` 的工程验证代码，且意图确为工程化 | **真工程化 → 可 `[no-issue]`** |
+
+性质优先于顶层目录：PR #1850 的 `packages/ui-components/README.md`、`packages/ui-elements/README.md` 与 `packages/ui-components/.business-frozen.json` 是允许示例，但不代表整个 `packages/**` 获得豁免。任意 JSON/隐藏文件、宽泛 `test/` 目录、近似测试名，以及 `packages/**/src/**`、`apps/mindx/**`、根 `src/**` 中除明确文档/严格测试外的业务或运行时代码都不获豁免。累计 diff 只要混入一项不允许资产就 fail closed。
+
+被分类器拒绝后必须绑定真实 Issue。
+
+**判定为 Feature/Bug/Experience 时的强制动作**：
+
+- ⛔ **禁止** `[no-issue]`，⛔ **禁止**把 type 降级写成 `chore`/`docs` 等去规避 issue 强制。
+- Feature/Experience 强制使用 `feat`；Bug 强制使用 `fix`。
+- 当前有真实 issue → subject 末尾带 `#<id>`。
+- **当前无 Issue → 先按角色/路径建 Issue**：产品/设计师仅记录需求时走 `start-feature` 创建唯一`需求池`；开始原型走 `prototype-workflow`。开发者必须加载 `start-feature` 的“开发者缺失 Issue”路径，并由其完整读取共享 Issue 创建契约。开发者兜底禁止直接执行原始 `cnb issues create-issue` 裸建；必须由该路径保证唯一 type 标签、严格模板正文、结构化 AC、唯一 `待研发`、当前开发者负责人和创建后远端复验，拿到真实 ID 后才可提交。**不准用 `[no-issue]` 跳过，不准编造 ID。**
+  - 上下文足以按确定性边界分类并生成模板 → 由相应 skill 创建并告知用户 Issue 链接。
+  - 只有分类证据冲突或模板必填信息不足时 → 阻塞并问一个最小问题，再继续相同 skill。
+
+**判定为「真工程化」时**：才允许开发者 `chore`/`docs`/`refactor`/`style`/`test`/`build`/`ci`/`perf` + `[no-issue]`（仍受角色 × type 矩阵约束）。分支名与 commit type 只做第一层分类，最终由 trusted CI 对累计 diff 重算工程资产类别；mixed diff 中只要包含业务/运行时、未知或非法路径就必须补 Issue。
+
+> 💡 这条约束与 `start-feature` skill 的「开发者轻量立项入口」是同一判定逻辑的两个触点：start-feature 在**编码前**建 issue + 切分支，本约束在**commit 时**兜底建 issue。任一处命中即可，二者幂等（已有 issue 时不重复建）。
+
+## 🧨 决策树（每次 commit 前必走）
+
+```
+即将调用 git commit -m "<msg>"
+  │
+  ├─ Step 1: 读 git config user.name → 比对 .vibe/developer-allowlist.json
+  │
+  ├─ Step 2: 角色判定
+  │     ├─ 命中开发者白名单 → 角色 = developer
+  │     └─ 未命中 → 角色 = designer（产品/设计师）
+  │
+  ├─ Step 3: 解析 commit subject 的 type 前缀
+  │     (feat / fix / revert / chore / docs / refactor / style / test / build / ci / perf 等)
+  │
+  ├─ Step 4: 角色 × type 矩阵决策
+  │     │
+  │     ├─ designer（产品/设计师）→ 必须带 #<issueid>
+  │     │   ├─ 当前有 issue → commit msg 末尾加 #<id>
+  │     │   └─ 当前无 issue → 立即停止；产品交付代码必须加载 prototype-workflow
+  │     │                  创建/校验原型 Issue 与分支后再 commit，不得只补 intake Issue
+  │     │
+  │     └─ developer（开发者）
+  │           ├─ commit_type=revert → 必须绑定真实 #<issueid>，禁用 [no-issue]
+  │           │
+  │           ├─ ⚠️ 先过【约束 5 语义自检】：基于会话意图 + git diff --staged
+  │           │   判断本次改动是 Feature / Bug / Experience / 真工程化
+  │           │
+  │           ├─ 语义=Feature|Experience → 强制 feat；语义=Bug → 强制 fix
+  │           │   禁止降级成 chore
+  │           │   ├─ 有 issue → commit msg 末尾加 #<id>
+  │           │   └─ 无 issue → 加载 start-feature developer missing-Issue path
+  │           │                  按共享契约创建并远端复验后再 commit。⛔ 禁止裸 CLI / [no-issue]
+  │           │
+  │           └─ 语义=真工程化（仅动明确文档/工程配置/CI/工具/治理元数据/严格 test-spec，无业务逻辑）
+  │                 commit_type ∈ [chore, docs, refactor, style, test, build, ci, perf]
+  │                 ├─ 有相关 issue（如 SDK 升级 issue / 重构 issue）→ #<id>
+  │                 └─ 无相关 issue → [no-issue]
+  │
+  └─ Step 5: 输出 [IssueBinding] 声明 + 执行 git commit
+```
+
+## 🛡️ 自我翻盘禁令（专门防"AI 觉得这次小改不用绑"）
+
+如果 AI 在本次会话中说过类似下列意思：
+
+- "只是修个 typo / 改一行 className，应该不用绑 issue"
+- "这是 hotfix 紧急修复，先 commit 再说，事后补 issue"
+- "用 #000 占位也可以"
+- "这个 issueid 我大概记得是 #117，应该没错"
+- "这次改的是业务代码，但写成 `chore: xxx [no-issue]` 应该能过 hook"（⛔ 典型伪装）
+- "Feature/Bug/Experience 改动太急，先用 chore + [no-issue] 提了，Issue 回头补"（⛔ 典型伪装）
+
+那么**禁止**在没有用户**明确文字授权**的情况下绕过本闸门。
+
+> 「我大概记得 issueid」的合法处理：**必须先调用CNB CLI `get_issue_detail` 校验真实存在**，再绑定。绝不允许"应该是这个 id 吧"的猜测。
+>
+> 「业务改动伪装成 chore + [no-issue]」的合法处理：**必须按约束 5 语义自检**——Feature/Experience 强制 `feat`，Bug 强制 `fix`，并绑定真实 `#<id>`；无 Issue 时加载 `start-feature` developer missing-Issue path，**不准降级 type 或裸 CLI 规避**。
+
+## ✅ 违规自查（commit 后回头检查）
+
+如果发现本次会话中**已经调用过** `git commit`，但之前没有 `[IssueBinding]` 开头的声明 → 视为违规，必须：
+
+1. 立即**停止**后续 push
+2. 跑 `git log -1 --pretty=%s` 拿到最新 commit subject
+3. 按决策树补判定：
+   - 若 subject 末尾**符合** `#<issueid>` / `[no-issue]` 且与角色 × type 矩阵相容 → 补输出 `[IssueBinding] ... （违规补档：未经声明已 commit）` 声明
+   - 若 subject 末尾**不符合** → 必须 `git commit --amend` 修正 subject，再补声明
+4. 如果违规 commit 已经被 push 到远端 → 告知用户 + 提供修复方案（push 后通常不再 amend，但需在下一次 commit 中体现自检结果）
+
+> 补档**不能掩盖事故**：若发现违规 commit 已 push 且无法 amend → 必须告知用户，且本次会话剩余所有 commit 都严格走闸门。
+
+## 📚 配套机制
+
+- **核心规范**：[`docs/release-workflow.md`](../../docs/release-workflow.md) §1 - §3（issue 绑定语义真相源）
+- **格式规范**：[`docs/git-spec.md`](../../docs/git-spec.md)（commit 格式 + 分支命名 + commit type↔分支 type 映射）
+- **本地兜底**：`.husky/commit-msg`（commitlint + `check-commit-issue-ref.mjs` + `check-chore-no-issue-abuse.mjs`）
+- **CI 兜底**：`scripts/workflow/check-commit-issue-ref.mjs`（issue 真实性）+ `scripts/workflow/check-chore-no-issue-abuse.mjs`（chore+[no-issue] diff 体检，曝光给 reviewer）
+- **chore 伪装兜底（人工 commit）**：`scripts/workflow/check-chore-no-issue-abuse.mjs` —— 当 `chore`/`docs`/`style`/`build`/`ci`/`refactor`/`perf` + `[no-issue]` 但 diff 命中业务区时阻塞（本地）/ 曝光（CI）；显式豁免出口 `[skip-issue]: <说明>`（commit body 一行）
+- **commitlint 规则**：`commitlint.config.cjs` 的 `subject-must-end-with-issue-ref`
+- **角色判定权威源**：`.vibe/developer-allowlist.json`
+- **MR 出口配套**：MR description 必须含 `Target-label`，由 `scripts/workflow/check-mr-sync-status.mjs` 校验
+- **发布脚本闭环**：`pnpm release:postpublish` 在发布完成后处理 `<待发布>` → `<已发布>`
+
+## 🧩 与其它机制的关系（解耦说明）
+
+| 机制                            | 职责                           | 与本规则的关系                                                                              |
+| :------------------------------ | :----------------------------- | :------------------------------------------------------------------------------------------ |
+| `dev-workflow.mdc`              | 代码改动分档 + Agent Team 派发 | **独立** — 本规则只管 commit 出口，不管代码档位                                             |
+| `user-role.mdc`                 | 角色判定 + SOP 物理基建        | **独立** — 本规则与它共享角色判定权威源（`.vibe/developer-allowlist.json`），但闸门独立生效 |
+| `conflict-resolver-route.mdc`   | git 历史改写前必检             | **独立** — 本规则只看 commit，不看 rebase/merge                                             |
+| `component-migration-route.mdc` | ui-components 改动前必检       | **独立** — 不同动作集                                                                       |
+| `cmd-publish` skill             | 出口管线（commit/MR/归档）     | 本规则是 cmd-publish 之前的**强制闸门**：即便 AI 跳过 cmd-publish 直接 commit，本规则仍生效 |
+| `start-feature` skill           | 产品 intake / 开发者补建 Issue | 本规则在开发者无 Issue 的产品语义 commit 兜底时强制进入 developer missing-Issue path        |
+
+**设计原则**：AI 在 commit 上有"用最短指令完成提交"的天然倾向。本规则作为强制声明 + 角色×type 矩阵 + CNB CLI 真实性校验的三重闸门，让"裸 git commit 不带 issue 引用"在本仓库内**结构性不可行**。
+
+## 🔁 五层防线总览（含本规则）
+
+```
+任务 → 主会话
+        │
+        ▼
+   ┌──────────────────────────────────────────────────────┐
+   │ ⓪ issue-binding-route.mdc (本规则 · alwaysApply)     │  ← 项目级硬规则
+   │   输出 [IssueBinding] 声明 + 角色×type 矩阵决策      │
+   │   不依赖任何 skill / agent 被加载                     │
+   └──────────────────────────────────────────────────────┘
+        │
+        ▼ (走 cmd-publish 时)
+   ┌──────────────────────────────────────┐
+   │ ① cmd-publish skill commit 前自检    │  ← skill 内部 SOP
+   └──────────────────────────────────────┘
+        │
+        ▼
+   ┌──────────────────────────────────────┐
+   │ ② commitlint subject 末尾规则        │  ← husky commit-msg
+   └──────────────────────────────────────┘
+        │
+        ▼
+   ┌──────────────────────────────────────┐
+   │ ③ check-commit-issue-ref.mjs（本地） │  ← husky commit-msg
+   └──────────────────────────────────────┘
+        │
+        ▼
+   ┌──────────────────────────────────────┐
+   │ ④ check-commit-issue-ref.mjs（CI）   │  ← CNB 强校验
+   │   调 CNB API 校验 issueid 真实性     │
+   └──────────────────────────────────────┘
+```
+
+只要 ⓪ 生效（项目级 alwaysApply），即使 ①②③ 因为 AI 跳过 cmd-publish 而全部失守，本规则也能在 `git commit` 调用前拦截；④ 再做最终兜底。

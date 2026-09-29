@@ -1,0 +1,54 @@
+name: 体验优化（Experience）
+description: 提交一个 MindX 产品体验优化建议
+labels: ["type:experience"]
+body:
+  - type: textarea
+    id: current_friction
+    attributes:
+      label: 体验问题/当前阻力
+      description: 描述当前体验中的不顺畅、理解成本或操作阻力。
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage_scenario
+    attributes:
+      label: 使用场景
+      description: 描述谁在什么情况下遇到该问题，并明确面向 Human、Agent 或两者。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_improvement
+    attributes:
+      label: 期望改善
+      description: 描述希望改善后的可感知结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: optimization_suggestion
+    attributes:
+      label: 优化建议
+      description: 可选。补充建议方案，不作为唯一实现方式。
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: 验收标准
+      description: "只是记录体验问题时可暂不填写；进入原型或研发前必须补齐。每条独占一行，精确格式为 `- [ ] AC-1: 可观察结果`。"
+      placeholder: |
+        - [ ] AC-1: ...
+        - [ ] AC-2: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: supporting_materials
+    attributes:
+      label: 补充材料
+      description: 可选。补充截图、录屏、数据或参考链接。
+    validations:
+      required: false

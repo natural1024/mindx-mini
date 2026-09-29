@@ -1,0 +1,48 @@
+dist
+lib
+public
+node_modules
+.nx
+.local*
+*.DS_Store
+.idea
+.cache
+.release/
+
+# CodeBuddy 中间产物
+.codebuddy/plans/
+.codebuddy/logs/
+
+# 业务契约（CI 归档到 Issue 后即为临时文件）
+.vibe/specs/
+
+# 个人本地活跃路由状态（每人独立，不入库）
+.vibe/active-route
+.vibe/mcp-debt.json
+tmp/
+.vibe/project-snapshot.json
+.vibe/notes/
+
+# 工作记忆（每人独立的本地笔记，不入库）
+.workbuddy/memory/
+
+# CodeBuddy / WorkBuddy automation 本地缓存（不进 git）
+.workbuddy/
+
+# local dev link
+.link-packages/
+# smart-doc-editor 本地联调路径配置（通过 /smart-doc-local 维护，每人独立）
+.smart-doc-editor-local
+# smart-engine 本地联调路径配置（通过 /smart-doc-local 维护，每人独立）
+.smart-engine-local
+
+# Ardot IDE screenshots
+.ardot-screenshots
+
+# 本地 dev server 运行日志（每人独立，不入库）
+.devlog/
+# docs-ai-page (smart-page 仓) 本地联调路径配置（每人独立，删除即关闭）
+.docs-ai-page-local
+
+# 伪翻译（pnpm i18n:pseudo）的词条备份，仅本地验证用，不入库
+**/locales/*/*.json.orig

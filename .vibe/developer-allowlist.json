@@ -1,0 +1,18 @@
+{
+  "$schema": "开发者白名单 — 角色判定的唯一权威源（single source of truth）",
+  "$description": [
+    "此文件供 .codebuddy/rules/user-role.mdc 执行 AI 角色判定，请勿在其他地方维护重复名单。",
+    "",
+    "维护规则：",
+    "- 列表中的 username 必须与工蜂 / git author name 完全一致（大小写敏感）",
+    "- 新增/移除开发者时，无需同步修改任何其他文件，所有引用方都直接读取此 JSON",
+    "- username 之外的字段（name / role）是注释性元数据，不参与逻辑判定"
+  ],
+  "developers": [
+    {
+      "username": "natural1024",
+      "role": "developer"
+    }
+  ],
+  "default_role_when_not_in_list": "designer"
+}
